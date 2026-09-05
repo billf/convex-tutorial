@@ -2,3 +2,8 @@ node_modules
 .DS_Store
 dist
 .env.local
+
+# Vendored by `npx convex ai-files install` — regenerate locally, don't commit.
+/.agents/skills/
+/skills-lock.json
+/convex/_generated/ai/
