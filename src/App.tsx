@@ -1,17 +1,27 @@
 import { useEffect, useState } from "react";
 import { faker } from "@faker-js/faker";
+import { useQuery, useMutation } from "convex/react";
+import { api } from "../convex/_generated/api";
+import type { Id } from "../convex/_generated/dataModel";
 
 // For demo purposes. In a real app, you'd have real user data.
 const NAME = getOrSetFakeName();
 
 export default function App() {
-  const messages = [
-    { _id: "1", user: "Alice", body: "Good morning!" },
-    { _id: "2", user: NAME, body: "Beautiful sunrise today" },
-  ];
-  // TODO: Add mutation hook here.
-
+  const messages = useQuery(api.chat.getMessages);
+  const getOrCreateUser = useMutation(api.chat.getOrCreateUser);
+  const sendMessage = useMutation(api.chat.sendMessage);
   const [newMessageText, setNewMessageText] = useState("");
+  const [userId, setUserId] = useState<Id<"users"> | null>(null);
+  const [userIdError, setUserIdError] = useState(false);
+  const [sendError, setSendError] = useState(false);
+
+  useEffect(() => {
+    getOrCreateUser({ name: NAME })
+      .then(setUserId)
+      .catch(() => setUserIdError(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     // Make sure scrollTo works on button click in Chrome
@@ -20,6 +30,7 @@ export default function App() {
     }, 0);
   }, [messages]);
 
+
   return (
     <main className="chat">
       <header>
@@ -27,13 +38,14 @@ export default function App() {
         <p>
           Connected as <strong>{NAME}</strong>
         </p>
+        {userIdError && <p>Couldn't connect — try reloading.</p>}
       </header>
       {messages?.map((message) => (
         <article
           key={message._id}
-          className={message.user === NAME ? "message-mine" : ""}
+          className={message.user === userId ? "message-mine" : ""}
         >
-          <div>{message.user}</div>
+          <div>{message.name}</div>
 
           <p>{message.body}</p>
         </article>
@@ -41,8 +53,16 @@ export default function App() {
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          alert("Mutation not implemented yet");
-          setNewMessageText("");
+          if (!userId) {
+            return;
+          }
+          try {
+            await sendMessage({ user: userId, body: newMessageText });
+            setNewMessageText("");
+            setSendError(false);
+          } catch {
+            setSendError(true);
+          }
         }}
       >
         <input
@@ -54,10 +74,11 @@ export default function App() {
           placeholder="Write a message…"
           autoFocus
         />
-        <button type="submit" disabled={!newMessageText}>
+        <button type="submit" disabled={!newMessageText || !userId}>
           Send
         </button>
       </form>
+      {sendError && <p>Message failed to send — try again.</p>}
     </main>
   );
 }
