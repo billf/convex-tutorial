@@ -3,6 +3,17 @@
 Write your Convex functions here.
 See https://docs.convex.dev/functions for more.
 
+## Tutorial security boundary
+
+The tutorial examples in this repository deliberately use anonymous public
+functions so that the examples can focus on Convex data flow. They are not a
+production authorization model: clients can read and write the shared example
+data, and identity-like values supplied in mutation arguments are not trusted
+proof of ownership.
+
+For a production app, configure authentication and use the server-side
+authenticated identity for authorization and ownership checks.
+
 A query function that takes two arguments looks like:
 
 ```ts
