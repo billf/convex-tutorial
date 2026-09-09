@@ -15,11 +15,15 @@ export default function App() {
   const [userId, setUserId] = useState<Id<"users"> | null>(null);
   const [userIdError, setUserIdError] = useState(false);
   const [sendError, setSendError] = useState(false);
+  const [isSending, setIsSending] = useState(false);
 
   useEffect(() => {
     getOrCreateUser({ name: NAME })
       .then(setUserId)
-      .catch(() => setUserIdError(true));
+      .catch((err) => {
+        console.error("getOrCreateUser failed", err);
+        setUserIdError(true);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -53,15 +57,19 @@ export default function App() {
       <form
         onSubmit={async (e) => {
           e.preventDefault();
-          if (!userId) {
+          if (!userId || isSending) {
             return;
           }
+          setIsSending(true);
           try {
             await sendMessage({ user: userId, body: newMessageText });
             setNewMessageText("");
             setSendError(false);
-          } catch {
+          } catch (err) {
+            console.error("sendMessage failed", err);
             setSendError(true);
+          } finally {
+            setIsSending(false);
           }
         }}
       >
@@ -74,7 +82,7 @@ export default function App() {
           placeholder="Write a message…"
           autoFocus
         />
-        <button type="submit" disabled={!newMessageText || !userId}>
+        <button type="submit" disabled={!newMessageText || !userId || isSending}>
           Send
         </button>
       </form>
