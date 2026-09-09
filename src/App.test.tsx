@@ -120,6 +120,17 @@ test("a successful sendMessage clears the input and clears a prior send error", 
   expect(input.value).toBe("");
 });
 
+test("renders without crashing while getMessages is still loading (undefined)", async () => {
+  getOrCreateUserMutation.mockResolvedValue("user123");
+  mockUseQuery.mockImplementation((ref: string) => {
+    if (ref === "getMessages") return undefined;
+    throw new Error(`unexpected useQuery ref: ${ref}`);
+  });
+
+  expect(() => render(<App />)).not.toThrow();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument());
+});
+
 test("message-mine is applied by id equality, not by display name", async () => {
   getOrCreateUserMutation.mockResolvedValue("user123");
   mockUseQuery.mockImplementation((ref: string) => {

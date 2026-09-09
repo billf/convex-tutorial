@@ -81,6 +81,7 @@ export default function App() {
           }}
           placeholder="Write a message…"
           autoFocus
+          disabled={isSending}
         />
         <button type="submit" disabled={!newMessageText || !userId || isSending}>
           Send
