@@ -38,7 +38,7 @@ test("sendMessage inserts a message tied to the given user", async () => {
 
 	const messages = await t.run((ctx) => ctx.db.query("messages").collect());
 	expect(messages).toHaveLength(1);
-	expect(messages[0].user).toBe(userId);
+	expect(messages[0].sender).toBe(userId);
 	expect(messages[0].body).toBe("hi");
 });
 
