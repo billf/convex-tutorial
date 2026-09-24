@@ -1,6 +1,24 @@
 import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 import schema from "./schema";
+
+// KTD8: messages moved from {user, body} to {room, sender, body}.
+// sendMessage lazily creates this default room so the client's
+// {user, body} call shape (src/App.tsx) needs no change.
+const DEFAULT_ROOM_NAME = "general";
+
+async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
+	const existing = await ctx.db
+		.query("rooms")
+		.withIndex("by_name", (q) => q.eq("name", DEFAULT_ROOM_NAME))
+		.unique();
+	if (existing !== null) {
+		return existing._id;
+	}
+	return await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
+}
 
 export const sendMessage = mutation({
 	args: {
@@ -9,31 +27,52 @@ export const sendMessage = mutation({
 	},
 	returns: v.null(),
 	handler: async (ctx, args) => {
+		const room = await getOrCreateDefaultRoom(ctx);
 		await ctx.db.insert("messages", {
-			user: args.user,
+			room,
+			sender: args.user,
 			body: args.body,
 		});
 	},
 });
 
-
 export const getMessages = query({
 	args: {},
-	returns: v.array(schema.doc("messages").extend({ name: v.string() })),
+	returns: v.array(
+		schema.doc("messages").extend({ user: v.id("users"), name: v.string() }),
+	),
 	handler: async (ctx) => {
-		// Get most recent messages first
-		const messages = await ctx.db.query("messages").order("desc").take(50);
+		// getMessages is a query and cannot insert, so it returns [] before
+		// the default room exists (i.e. before any message has been sent).
+		const room = await ctx.db
+			.query("rooms")
+			.withIndex("by_name", (q) => q.eq("name", DEFAULT_ROOM_NAME))
+			.unique();
+		if (room === null) {
+			return [];
+		}
 
-		const uniqueUserIds = [...new Set(messages.map((message) => message.user))];
-		const users = await Promise.all(uniqueUserIds.map((userId) => ctx.db.get("users", userId)));
-		const nameByUserId = new Map(
-			users.map((user, i) => [uniqueUserIds[i], user?.name ?? "Unknown"]),
+		// Get most recent messages first
+		const messages = await ctx.db
+			.query("messages")
+			.withIndex("by_room", (q) => q.eq("room", room._id))
+			.order("desc")
+			.take(50);
+
+		const uniqueSenderIds = [...new Set(messages.map((message) => message.sender))];
+		const senders = await Promise.all(
+			uniqueSenderIds.map((senderId) => ctx.db.get("users", senderId)),
+		);
+		const nameBySenderId = new Map(
+			senders.map((sender, i) => [uniqueSenderIds[i], sender?.name ?? "Unknown"]),
 		);
 
 		// Reverse the list so that it's in a chronological order.
 		return messages.reverse().map((message) => ({
 			...message,
-			name: nameByUserId.get(message.user) ?? "Unknown",
+			// `user` aliases `sender` so existing clients (src/App.tsx) need no change.
+			user: message.sender,
+			name: nameBySenderId.get(message.sender) ?? "Unknown",
 		}));
 	},
 });
