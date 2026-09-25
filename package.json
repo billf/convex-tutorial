@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "convex dev --start 'vite --open'",
     "build": "tsc && vite build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "proof-vehicle-load": "tsx scripts/proof-vehicle-load.ts"
   },
   "dependencies": {
     "@faker-js/faker": "^10.0.0",
@@ -23,6 +24,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "convex-test": "^0.0.56",
     "jsdom": "^30.0.1",
+    "tsx": "^4.23.13",
     "typescript": "~5.0.3",
     "vite": "^6.4.3",
     "vitest": "^2.1.9"
