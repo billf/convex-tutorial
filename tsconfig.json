@@ -15,5 +15,5 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["./src", "./convex", "vite.config.mts"]
+  "include": ["./src", "./convex", "./scripts", "vite.config.mts"]
 }
