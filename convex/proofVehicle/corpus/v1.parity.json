@@ -1,0 +1,138 @@
+{
+	"fixtureSetVersion": "1.0.0",
+	"hashAlgorithm": "sha256-json-sorted-keys-v1",
+	"vectors": {
+		"V1": {
+			"rooms": {
+				"count": 1,
+				"contentHash": "4e34695763442b021e1e77986932ba24c76c6956dd265d475d51ac002e1e4ba9"
+			},
+			"users": {
+				"count": 1,
+				"contentHash": "1d3ffb507990d82352043171216a25e571387a7928c894c893123c22b88ad810"
+			},
+			"memberships": {
+				"count": 1,
+				"contentHash": "7111ae1530702364ce932d76b2c5c69c33637319a4e3500d58231c5b5a422478"
+			},
+			"messages": {
+				"count": 1,
+				"contentHash": "a8ef79a3bbfbcea73713d292b874d9c40347f78e41ebafec0b50002aac90d9e4"
+			},
+			"likes": {
+				"count": 0,
+				"contentHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+			}
+		},
+		"V2": {
+			"rooms": {
+				"count": 1,
+				"contentHash": "4e34695763442b021e1e77986932ba24c76c6956dd265d475d51ac002e1e4ba9"
+			},
+			"users": {
+				"count": 2,
+				"contentHash": "75d6a6b7169aed0e06328cfdd1864ac83c273a06aa5480bddbeb7f421db8927f"
+			},
+			"memberships": {
+				"count": 2,
+				"contentHash": "69d46a4d98dd03493d1b600a1c6878cb09d2575dd554bcbb6aeefc3332fcc233"
+			},
+			"messages": {
+				"count": 2,
+				"contentHash": "00ec1fb18efdf18946699a5092792f1c0f58b408a594be73e4c2662af37d3ede"
+			},
+			"likes": {
+				"count": 0,
+				"contentHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+			}
+		},
+		"V3": {
+			"rooms": {
+				"count": 1,
+				"contentHash": "4e34695763442b021e1e77986932ba24c76c6956dd265d475d51ac002e1e4ba9"
+			},
+			"users": {
+				"count": 3,
+				"contentHash": "21b5dfa29a4e8059d6bf12441d894a7ad1ff3a1b68c8cb042829d64c7a77f47c"
+			},
+			"memberships": {
+				"count": 1,
+				"contentHash": "de3a76fcfc45f9dff755cb39cd14b0bb7b846c203dfdb7ac6bd50dcd719ab50f"
+			},
+			"messages": {
+				"count": 1,
+				"contentHash": "9c1ce4478a60688961bb9c20a46a2d6014bcf6ab74c363fb2b8779fb0cbc799d"
+			},
+			"likes": {
+				"count": 0,
+				"contentHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+			}
+		},
+		"V4": {
+			"rooms": {
+				"count": 1,
+				"contentHash": "4e34695763442b021e1e77986932ba24c76c6956dd265d475d51ac002e1e4ba9"
+			},
+			"users": {
+				"count": 1,
+				"contentHash": "b081c2b7ac233ed3a70c17957a6014250ad7a320d01f15106ff0a71d1aed2161"
+			},
+			"memberships": {
+				"count": 1,
+				"contentHash": "de3a76fcfc45f9dff755cb39cd14b0bb7b846c203dfdb7ac6bd50dcd719ab50f"
+			},
+			"messages": {
+				"count": 51,
+				"contentHash": "711439961d334f625afa035a8919bd61c5c196230fe48350b3ff028736dc5f21"
+			},
+			"likes": {
+				"count": 0,
+				"contentHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+			}
+		},
+		"V5": {
+			"rooms": {
+				"count": 1,
+				"contentHash": "4e34695763442b021e1e77986932ba24c76c6956dd265d475d51ac002e1e4ba9"
+			},
+			"users": {
+				"count": 2,
+				"contentHash": "75d6a6b7169aed0e06328cfdd1864ac83c273a06aa5480bddbeb7f421db8927f"
+			},
+			"memberships": {
+				"count": 2,
+				"contentHash": "0167ac7feff3890d0bcabbc2dd5b86f2d00120d23d2b2198a3bd80721f682a5a"
+			},
+			"messages": {
+				"count": 2,
+				"contentHash": "00ec1fb18efdf18946699a5092792f1c0f58b408a594be73e4c2662af37d3ede"
+			},
+			"likes": {
+				"count": 1,
+				"contentHash": "517728a88f8b2f5bf120c0dc2bb4e99ba5c8ba93ba83fd16b608f6642ac80254"
+			}
+		},
+		"V6": {
+			"rooms": {
+				"count": 1,
+				"contentHash": "4e34695763442b021e1e77986932ba24c76c6956dd265d475d51ac002e1e4ba9"
+			},
+			"users": {
+				"count": 2,
+				"contentHash": "75d6a6b7169aed0e06328cfdd1864ac83c273a06aa5480bddbeb7f421db8927f"
+			},
+			"memberships": {
+				"count": 1,
+				"contentHash": "de3a76fcfc45f9dff755cb39cd14b0bb7b846c203dfdb7ac6bd50dcd719ab50f"
+			},
+			"messages": {
+				"count": 1,
+				"contentHash": "f9e85ccd3a9b3e15afde154129544c608bd281e7fac757a008995b354f55320d"
+			},
+			"likes": {
+				"count": 1,
+				"contentHash": "517728a88f8b2f5bf120c0dc2bb4e99ba5c8ba93ba83fd16b608f6642ac80254"
+			}
+		}
+	}
+}

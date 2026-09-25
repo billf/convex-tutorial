@@ -1,0 +1,1531 @@
+{
+	"fixtureSetVersion": "1.0.0",
+	"source": "research/skip-convex-integration/semantic-vectors-v1.md",
+	"staticIndexes": [
+		"memberships.by_room_user[room,user]",
+		"messages.by_room[room]",
+		"messages.by_sender[sender]",
+		"likes.by_message[message]"
+	],
+	"vectors": {
+		"V1": {
+			"title": "dangling sender",
+			"base": [
+				{
+					"op": "insertRoom",
+					"label": "r",
+					"name": "room"
+				},
+				{
+					"op": "insertUser",
+					"label": "u",
+					"name": "Ada"
+				},
+				{
+					"op": "insertMembership",
+					"label": "mu",
+					"room": "r",
+					"user": "u",
+					"active": true
+				},
+				{
+					"op": "insertMessage",
+					"label": "a",
+					"room": "r",
+					"sender": "u",
+					"body": "one",
+					"creationTime": 10
+				}
+			],
+			"expectedBase": [
+				{
+					"id": "a",
+					"creationTime": 10,
+					"room": "r",
+					"body": "one",
+					"sender": {
+						"id": "u",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				}
+			],
+			"deltas": [
+				{
+					"mutation": "deleteUser",
+					"args": {
+						"user": "u"
+					}
+				}
+			],
+			"expectedAfterDelta": [
+				[
+					{
+						"id": "a",
+						"creationTime": 10,
+						"room": "r",
+						"body": "one",
+						"sender": null,
+						"likeCount": 0
+					}
+				]
+			]
+		},
+		"V2": {
+			"title": "active membership",
+			"base": [
+				{
+					"op": "insertRoom",
+					"label": "r",
+					"name": "room"
+				},
+				{
+					"op": "insertUser",
+					"label": "a",
+					"name": "Ada"
+				},
+				{
+					"op": "insertUser",
+					"label": "b",
+					"name": "Bea"
+				},
+				{
+					"op": "insertMembership",
+					"label": "ma",
+					"room": "r",
+					"user": "a",
+					"active": true
+				},
+				{
+					"op": "insertMembership",
+					"label": "mb",
+					"room": "r",
+					"user": "b",
+					"active": false
+				},
+				{
+					"op": "insertMessage",
+					"label": "a1",
+					"room": "r",
+					"sender": "a",
+					"body": "a",
+					"creationTime": 20
+				},
+				{
+					"op": "insertMessage",
+					"label": "b1",
+					"room": "r",
+					"sender": "b",
+					"body": "b",
+					"creationTime": 19
+				}
+			],
+			"expectedBase": [
+				{
+					"id": "a1",
+					"creationTime": 20,
+					"room": "r",
+					"body": "a",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				}
+			],
+			"deltas": [
+				{
+					"mutation": "setMembershipActive",
+					"args": {
+						"membership": "ma",
+						"active": false
+					}
+				},
+				{
+					"mutation": "setMembershipActive",
+					"args": {
+						"membership": "mb",
+						"active": true
+					}
+				}
+			],
+			"expectedAfterDelta": [
+				null,
+				[
+					{
+						"id": "b1",
+						"creationTime": 19,
+						"room": "r",
+						"body": "b",
+						"sender": {
+							"id": "b",
+							"name": "Bea"
+						},
+						"likeCount": 0
+					}
+				]
+			]
+		},
+		"V3": {
+			"title": "like add, removal, and dangling liked user",
+			"base": [
+				{
+					"op": "insertRoom",
+					"label": "r",
+					"name": "room"
+				},
+				{
+					"op": "insertUser",
+					"label": "a",
+					"name": "Ada"
+				},
+				{
+					"op": "insertUser",
+					"label": "b",
+					"name": "Bea"
+				},
+				{
+					"op": "insertUser",
+					"label": "c",
+					"name": "Cy"
+				},
+				{
+					"op": "insertMembership",
+					"label": "ma",
+					"room": "r",
+					"user": "a",
+					"active": true
+				},
+				{
+					"op": "insertMessage",
+					"label": "a1",
+					"room": "r",
+					"sender": "a",
+					"body": "liked",
+					"creationTime": 30
+				}
+			],
+			"expectedBase": [
+				{
+					"id": "a1",
+					"creationTime": 30,
+					"room": "r",
+					"body": "liked",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				}
+			],
+			"deltas": [
+				{
+					"mutation": "addLike",
+					"args": {
+						"message": "a1",
+						"user": "b"
+					},
+					"label": "l1"
+				},
+				{
+					"mutation": "removeLike",
+					"args": {
+						"like": "l1"
+					}
+				},
+				{
+					"mutation": "addLike",
+					"args": {
+						"message": "a1",
+						"user": "c"
+					},
+					"label": "l2"
+				},
+				{
+					"mutation": "deleteUser",
+					"args": {
+						"user": "c"
+					}
+				}
+			],
+			"expectedAfterDelta": [
+				[
+					{
+						"id": "a1",
+						"creationTime": 30,
+						"room": "r",
+						"body": "liked",
+						"sender": {
+							"id": "a",
+							"name": "Ada"
+						},
+						"likeCount": 1
+					}
+				],
+				[
+					{
+						"id": "a1",
+						"creationTime": 30,
+						"room": "r",
+						"body": "liked",
+						"sender": {
+							"id": "a",
+							"name": "Ada"
+						},
+						"likeCount": 0
+					}
+				],
+				null,
+				[
+					{
+						"id": "a1",
+						"creationTime": 30,
+						"room": "r",
+						"body": "liked",
+						"sender": {
+							"id": "a",
+							"name": "Ada"
+						},
+						"likeCount": 1
+					}
+				]
+			]
+		},
+		"V4": {
+			"title": "exact 50-row boundary and ID tie",
+			"base": [
+				{
+					"op": "insertRoom",
+					"label": "r",
+					"name": "room"
+				},
+				{
+					"op": "insertUser",
+					"label": "a",
+					"name": "Ada"
+				},
+				{
+					"op": "insertMembership",
+					"label": "ma",
+					"room": "r",
+					"user": "a",
+					"active": true
+				},
+				{
+					"op": "insertMessage",
+					"label": "m51",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m51",
+					"creationTime": 51
+				},
+				{
+					"op": "insertMessage",
+					"label": "m50",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m50",
+					"creationTime": 51
+				},
+				{
+					"op": "insertMessage",
+					"label": "m49",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m49",
+					"creationTime": 49
+				},
+				{
+					"op": "insertMessage",
+					"label": "m48",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m48",
+					"creationTime": 48
+				},
+				{
+					"op": "insertMessage",
+					"label": "m47",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m47",
+					"creationTime": 47
+				},
+				{
+					"op": "insertMessage",
+					"label": "m46",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m46",
+					"creationTime": 46
+				},
+				{
+					"op": "insertMessage",
+					"label": "m45",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m45",
+					"creationTime": 45
+				},
+				{
+					"op": "insertMessage",
+					"label": "m44",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m44",
+					"creationTime": 44
+				},
+				{
+					"op": "insertMessage",
+					"label": "m43",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m43",
+					"creationTime": 43
+				},
+				{
+					"op": "insertMessage",
+					"label": "m42",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m42",
+					"creationTime": 42
+				},
+				{
+					"op": "insertMessage",
+					"label": "m41",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m41",
+					"creationTime": 41
+				},
+				{
+					"op": "insertMessage",
+					"label": "m40",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m40",
+					"creationTime": 40
+				},
+				{
+					"op": "insertMessage",
+					"label": "m39",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m39",
+					"creationTime": 39
+				},
+				{
+					"op": "insertMessage",
+					"label": "m38",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m38",
+					"creationTime": 38
+				},
+				{
+					"op": "insertMessage",
+					"label": "m37",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m37",
+					"creationTime": 37
+				},
+				{
+					"op": "insertMessage",
+					"label": "m36",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m36",
+					"creationTime": 36
+				},
+				{
+					"op": "insertMessage",
+					"label": "m35",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m35",
+					"creationTime": 35
+				},
+				{
+					"op": "insertMessage",
+					"label": "m34",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m34",
+					"creationTime": 34
+				},
+				{
+					"op": "insertMessage",
+					"label": "m33",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m33",
+					"creationTime": 33
+				},
+				{
+					"op": "insertMessage",
+					"label": "m32",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m32",
+					"creationTime": 32
+				},
+				{
+					"op": "insertMessage",
+					"label": "m31",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m31",
+					"creationTime": 31
+				},
+				{
+					"op": "insertMessage",
+					"label": "m30",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m30",
+					"creationTime": 30
+				},
+				{
+					"op": "insertMessage",
+					"label": "m29",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m29",
+					"creationTime": 29
+				},
+				{
+					"op": "insertMessage",
+					"label": "m28",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m28",
+					"creationTime": 28
+				},
+				{
+					"op": "insertMessage",
+					"label": "m27",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m27",
+					"creationTime": 27
+				},
+				{
+					"op": "insertMessage",
+					"label": "m26",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m26",
+					"creationTime": 26
+				},
+				{
+					"op": "insertMessage",
+					"label": "m25",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m25",
+					"creationTime": 25
+				},
+				{
+					"op": "insertMessage",
+					"label": "m24",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m24",
+					"creationTime": 24
+				},
+				{
+					"op": "insertMessage",
+					"label": "m23",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m23",
+					"creationTime": 23
+				},
+				{
+					"op": "insertMessage",
+					"label": "m22",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m22",
+					"creationTime": 22
+				},
+				{
+					"op": "insertMessage",
+					"label": "m21",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m21",
+					"creationTime": 21
+				},
+				{
+					"op": "insertMessage",
+					"label": "m20",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m20",
+					"creationTime": 20
+				},
+				{
+					"op": "insertMessage",
+					"label": "m19",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m19",
+					"creationTime": 19
+				},
+				{
+					"op": "insertMessage",
+					"label": "m18",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m18",
+					"creationTime": 18
+				},
+				{
+					"op": "insertMessage",
+					"label": "m17",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m17",
+					"creationTime": 17
+				},
+				{
+					"op": "insertMessage",
+					"label": "m16",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m16",
+					"creationTime": 16
+				},
+				{
+					"op": "insertMessage",
+					"label": "m15",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m15",
+					"creationTime": 15
+				},
+				{
+					"op": "insertMessage",
+					"label": "m14",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m14",
+					"creationTime": 14
+				},
+				{
+					"op": "insertMessage",
+					"label": "m13",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m13",
+					"creationTime": 13
+				},
+				{
+					"op": "insertMessage",
+					"label": "m12",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m12",
+					"creationTime": 12
+				},
+				{
+					"op": "insertMessage",
+					"label": "m11",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m11",
+					"creationTime": 11
+				},
+				{
+					"op": "insertMessage",
+					"label": "m10",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m10",
+					"creationTime": 10
+				},
+				{
+					"op": "insertMessage",
+					"label": "m09",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m09",
+					"creationTime": 9
+				},
+				{
+					"op": "insertMessage",
+					"label": "m08",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m08",
+					"creationTime": 8
+				},
+				{
+					"op": "insertMessage",
+					"label": "m07",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m07",
+					"creationTime": 7
+				},
+				{
+					"op": "insertMessage",
+					"label": "m06",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m06",
+					"creationTime": 6
+				},
+				{
+					"op": "insertMessage",
+					"label": "m05",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m05",
+					"creationTime": 5
+				},
+				{
+					"op": "insertMessage",
+					"label": "m04",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m04",
+					"creationTime": 4
+				},
+				{
+					"op": "insertMessage",
+					"label": "m03",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m03",
+					"creationTime": 3
+				},
+				{
+					"op": "insertMessage",
+					"label": "m02",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m02",
+					"creationTime": 2
+				},
+				{
+					"op": "insertMessage",
+					"label": "m01",
+					"room": "r",
+					"sender": "a",
+					"body": "message-m01",
+					"creationTime": 1
+				}
+			],
+			"expectedBase": [
+				{
+					"id": "m51",
+					"creationTime": 51,
+					"room": "r",
+					"body": "message-m51",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m50",
+					"creationTime": 50,
+					"room": "r",
+					"body": "message-m50",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m49",
+					"creationTime": 49,
+					"room": "r",
+					"body": "message-m49",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m48",
+					"creationTime": 48,
+					"room": "r",
+					"body": "message-m48",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m47",
+					"creationTime": 47,
+					"room": "r",
+					"body": "message-m47",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m46",
+					"creationTime": 46,
+					"room": "r",
+					"body": "message-m46",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m45",
+					"creationTime": 45,
+					"room": "r",
+					"body": "message-m45",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m44",
+					"creationTime": 44,
+					"room": "r",
+					"body": "message-m44",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m43",
+					"creationTime": 43,
+					"room": "r",
+					"body": "message-m43",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m42",
+					"creationTime": 42,
+					"room": "r",
+					"body": "message-m42",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m41",
+					"creationTime": 41,
+					"room": "r",
+					"body": "message-m41",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m40",
+					"creationTime": 40,
+					"room": "r",
+					"body": "message-m40",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m39",
+					"creationTime": 39,
+					"room": "r",
+					"body": "message-m39",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m38",
+					"creationTime": 38,
+					"room": "r",
+					"body": "message-m38",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m37",
+					"creationTime": 37,
+					"room": "r",
+					"body": "message-m37",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m36",
+					"creationTime": 36,
+					"room": "r",
+					"body": "message-m36",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m35",
+					"creationTime": 35,
+					"room": "r",
+					"body": "message-m35",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m34",
+					"creationTime": 34,
+					"room": "r",
+					"body": "message-m34",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m33",
+					"creationTime": 33,
+					"room": "r",
+					"body": "message-m33",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m32",
+					"creationTime": 32,
+					"room": "r",
+					"body": "message-m32",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m31",
+					"creationTime": 31,
+					"room": "r",
+					"body": "message-m31",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m30",
+					"creationTime": 30,
+					"room": "r",
+					"body": "message-m30",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m29",
+					"creationTime": 29,
+					"room": "r",
+					"body": "message-m29",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m28",
+					"creationTime": 28,
+					"room": "r",
+					"body": "message-m28",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m27",
+					"creationTime": 27,
+					"room": "r",
+					"body": "message-m27",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m26",
+					"creationTime": 26,
+					"room": "r",
+					"body": "message-m26",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m25",
+					"creationTime": 25,
+					"room": "r",
+					"body": "message-m25",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m24",
+					"creationTime": 24,
+					"room": "r",
+					"body": "message-m24",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m23",
+					"creationTime": 23,
+					"room": "r",
+					"body": "message-m23",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m22",
+					"creationTime": 22,
+					"room": "r",
+					"body": "message-m22",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m21",
+					"creationTime": 21,
+					"room": "r",
+					"body": "message-m21",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m20",
+					"creationTime": 20,
+					"room": "r",
+					"body": "message-m20",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m19",
+					"creationTime": 19,
+					"room": "r",
+					"body": "message-m19",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m18",
+					"creationTime": 18,
+					"room": "r",
+					"body": "message-m18",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m17",
+					"creationTime": 17,
+					"room": "r",
+					"body": "message-m17",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m16",
+					"creationTime": 16,
+					"room": "r",
+					"body": "message-m16",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m15",
+					"creationTime": 15,
+					"room": "r",
+					"body": "message-m15",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m14",
+					"creationTime": 14,
+					"room": "r",
+					"body": "message-m14",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m13",
+					"creationTime": 13,
+					"room": "r",
+					"body": "message-m13",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m12",
+					"creationTime": 12,
+					"room": "r",
+					"body": "message-m12",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m11",
+					"creationTime": 11,
+					"room": "r",
+					"body": "message-m11",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m10",
+					"creationTime": 10,
+					"room": "r",
+					"body": "message-m10",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m09",
+					"creationTime": 9,
+					"room": "r",
+					"body": "message-m09",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m08",
+					"creationTime": 8,
+					"room": "r",
+					"body": "message-m08",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m07",
+					"creationTime": 7,
+					"room": "r",
+					"body": "message-m07",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m06",
+					"creationTime": 6,
+					"room": "r",
+					"body": "message-m06",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m05",
+					"creationTime": 5,
+					"room": "r",
+					"body": "message-m05",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m04",
+					"creationTime": 4,
+					"room": "r",
+					"body": "message-m04",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m03",
+					"creationTime": 3,
+					"room": "r",
+					"body": "message-m03",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				},
+				{
+					"id": "m02",
+					"creationTime": 2,
+					"room": "r",
+					"body": "message-m02",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 0
+				}
+			],
+			"note": "m51 and m50 share creationTime 51 (the ID tie); convex-test cannot force an exact tie via the public insert API (see the plan Assumptions), so proofVehicle.test.ts checks the *set* of included IDs here and defers the literal tie-break order to the snapshot reference run (U11).",
+			"deltas": [],
+			"expectedAfterDelta": []
+		},
+		"V5": {
+			"title": "deletes",
+			"base": [
+				{
+					"op": "insertRoom",
+					"label": "r",
+					"name": "room"
+				},
+				{
+					"op": "insertUser",
+					"label": "a",
+					"name": "Ada"
+				},
+				{
+					"op": "insertUser",
+					"label": "b",
+					"name": "Bea"
+				},
+				{
+					"op": "insertMembership",
+					"label": "ma",
+					"room": "r",
+					"user": "a",
+					"active": true
+				},
+				{
+					"op": "insertMembership",
+					"label": "mb",
+					"room": "r",
+					"user": "b",
+					"active": true
+				},
+				{
+					"op": "insertMessage",
+					"label": "a1",
+					"room": "r",
+					"sender": "a",
+					"body": "a",
+					"creationTime": 40
+				},
+				{
+					"op": "insertMessage",
+					"label": "b1",
+					"room": "r",
+					"sender": "b",
+					"body": "b",
+					"creationTime": 39
+				},
+				{
+					"op": "insertLike",
+					"label": "l1",
+					"message": "a1",
+					"user": "b"
+				}
+			],
+			"expectedBase": [
+				{
+					"id": "a1",
+					"creationTime": 40,
+					"room": "r",
+					"body": "a",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 1
+				},
+				{
+					"id": "b1",
+					"creationTime": 39,
+					"room": "r",
+					"body": "b",
+					"sender": {
+						"id": "b",
+						"name": "Bea"
+					},
+					"likeCount": 0
+				}
+			],
+			"independentDeltas": [
+				{
+					"title": "delete Msg(a1) removes a1 and its count",
+					"mutation": "deleteMessage",
+					"args": {
+						"message": "a1"
+					},
+					"expected": [
+						{
+							"id": "b1",
+							"creationTime": 39,
+							"room": "r",
+							"body": "b",
+							"sender": {
+								"id": "b",
+								"name": "Bea"
+							},
+							"likeCount": 0
+						}
+					]
+				},
+				{
+					"title": "delete L(l1) changes a1 to count zero",
+					"mutation": "removeLike",
+					"args": {
+						"like": "l1"
+					},
+					"expected": [
+						{
+							"id": "a1",
+							"creationTime": 40,
+							"room": "r",
+							"body": "a",
+							"sender": {
+								"id": "a",
+								"name": "Ada"
+							},
+							"likeCount": 0
+						},
+						{
+							"id": "b1",
+							"creationTime": 39,
+							"room": "r",
+							"body": "b",
+							"sender": {
+								"id": "b",
+								"name": "Bea"
+							},
+							"likeCount": 0
+						}
+					]
+				},
+				{
+					"title": "delete U(a) retains a1 with sender null",
+					"mutation": "deleteUser",
+					"args": {
+						"user": "a"
+					},
+					"expected": [
+						{
+							"id": "a1",
+							"creationTime": 40,
+							"room": "r",
+							"body": "a",
+							"sender": null,
+							"likeCount": 1
+						},
+						{
+							"id": "b1",
+							"creationTime": 39,
+							"room": "r",
+							"body": "b",
+							"sender": {
+								"id": "b",
+								"name": "Bea"
+							},
+							"likeCount": 0
+						}
+					]
+				},
+				{
+					"title": "deactivate M(ma) excludes a1",
+					"mutation": "setMembershipActive",
+					"args": {
+						"membership": "ma",
+						"active": false
+					},
+					"expected": [
+						{
+							"id": "b1",
+							"creationTime": 39,
+							"room": "r",
+							"body": "b",
+							"sender": {
+								"id": "b",
+								"name": "Bea"
+							},
+							"likeCount": 0
+						}
+					]
+				}
+			]
+		},
+		"V6": {
+			"title": "atomic membership plus like transaction",
+			"base": [
+				{
+					"op": "insertRoom",
+					"label": "r",
+					"name": "room"
+				},
+				{
+					"op": "insertUser",
+					"label": "a",
+					"name": "Ada"
+				},
+				{
+					"op": "insertUser",
+					"label": "b",
+					"name": "Bea"
+				},
+				{
+					"op": "insertMembership",
+					"label": "ma",
+					"room": "r",
+					"user": "a",
+					"active": true
+				},
+				{
+					"op": "insertMessage",
+					"label": "a1",
+					"room": "r",
+					"sender": "a",
+					"body": "atomic",
+					"creationTime": 50
+				},
+				{
+					"op": "insertLike",
+					"label": "l1",
+					"message": "a1",
+					"user": "b"
+				}
+			],
+			"expectedBase": [
+				{
+					"id": "a1",
+					"creationTime": 50,
+					"room": "r",
+					"body": "atomic",
+					"sender": {
+						"id": "a",
+						"name": "Ada"
+					},
+					"likeCount": 1
+				}
+			],
+			"deltas": [
+				{
+					"mutation": "membershipAndLikesTxn",
+					"args": {
+						"membership": "ma",
+						"active": false,
+						"message": "a1",
+						"user": "b"
+					},
+					"label": "l2"
+				}
+			],
+			"expectedAfterDelta": [
+				[]
+			]
+		}
+	}
+}
