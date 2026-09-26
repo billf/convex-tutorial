@@ -6,10 +6,20 @@
  * Loads one corpus vector (V1-V6) into a real Convex deployment: phased
  * `npx convex import` for the base state (rooms/users first with
  * `--replace`, then memberships/messages with resolved foreign keys, then
- * likes), ID read-back through `proofVehicle/tables:*` queries, label
- * binding, and (for V4) the post-bind body patch on the tied m50/m51 rows.
- * Prints the label-binding map as JSON on stdout so a caller (a harness, or
- * a human) never has to infer real IDs.
+ * likes), then ID read-back through `proofVehicle/tables:*` queries and
+ * label binding. Prints the label-binding map as JSON on stdout so a caller
+ * (a harness, or a human) never has to infer real IDs.
+ *
+ * Does NOT perform V4's post-bind body patch (`proofVehicle/fixture:
+ * patchMessageBody`): m50/m51's bodies import verbatim from the corpus (u5
+ * review M4 -- this doc comment previously overclaimed the patch step; it
+ * did not exist in main()). That means the m50/m51 *label binding* is
+ * correct (bodies are distinct per-op strings), but the literal
+ * m51-before-m50 _creationTime tie order this loader is supposed to prove
+ * is NOT established by this script alone: nothing here enforces which of
+ * the two random real IDs Convex assigns sorts first. Both gaps -- adding a
+ * patch step if one turns out to be needed, and proving the tie order --
+ * are the snapshot reference run's job (U11), not this script's.
  *
  * Usage: npx tsx scripts/proof-vehicle-load.ts <V1|V2|V3|V4|V5|V6>
  *
