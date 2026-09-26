@@ -13,10 +13,13 @@
  *
  * Usage: npx tsx scripts/proof-vehicle-load.ts <V1|V2|V3|V4|V5|V6>
  *
- * Requires CONVEX_URL (or CONVEX_DEPLOYMENT via `npx convex dev`'s own env
- * file) to point at the target deployment, and PROOF_VEHICLE_FIXTURE=1 set
- * on it (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a delta calls
- * `fixture:reset`.
+ * Requires both CONVEX_URL (for reads) and CONVEX_DEPLOYMENT (passed
+ * explicitly to every `npx convex import`, so writes cannot silently
+ * default to a different deployment than CONVEX_URL points at -- see M1 in
+ * the u5 review) to point at the same target deployment, both set together
+ * by `npx convex dev`'s own env file, and PROOF_VEHICLE_FIXTURE=1 set on
+ * that deployment (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a
+ * delta calls `fixture:reset`.
  *
  * The target deployment's rooms/users/memberships/messages/likes tables
  * must all be empty before running this (rooms/users import with
@@ -122,12 +125,17 @@ export function buildImportRows(
 	});
 }
 
-function runConvexImport(table: string, rows: Record<string, unknown>[], replace: boolean): void {
+function runConvexImport(
+	table: string,
+	rows: Record<string, unknown>[],
+	replace: boolean,
+	deployment: string,
+): void {
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
 	const file = join(dir, `${table}.jsonl`);
 	writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
 	try {
-		const args = ["convex", "import", "--table", table, "--yes"];
+		const args = ["convex", "import", "--deployment", deployment, "--table", table, "--yes"];
 		if (replace) args.push("--replace");
 		args.push(file);
 		execFileSync("npx", args, { stdio: "inherit" });
@@ -214,6 +222,28 @@ async function main(): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+	// M1: the read client (ConvexHttpClient, above) and the write path
+	// (`npx convex import`, below) must name the same deployment
+	// explicitly -- previously the import subprocess passed no deployment
+	// flag at all, so it silently used the CLI's own default resolution
+	// (the project's dev deployment), which is only guaranteed to match
+	// CONVEX_URL by operator discipline, not by anything this script
+	// checked. CONVEX_DEPLOYMENT is the identifier `npx convex import`
+	// itself accepts via --deployment; requiring it removes the implicit
+	// default, but does not prove it names the same deployment CONVEX_URL
+	// points at -- see this commit's message for why that stronger check
+	// isn't implemented here.
+	const deployment = process.env["CONVEX_DEPLOYMENT"];
+	if (deployment === undefined) {
+		console.error(
+			"proof-vehicle-load.ts: CONVEX_DEPLOYMENT is not set. Every `npx convex import` call " +
+				"needs an explicit --deployment target so it cannot silently default to a different " +
+				"deployment than CONVEX_URL (the read client) points at. Set it to the same deployment " +
+				"as CONVEX_URL, e.g. via `npx convex dev`'s own env file.",
+		);
+		process.exitCode = 1;
+		return;
+	}
 	const client = new ConvexHttpClient(url);
 
 	const existingMessages = await client.query(
@@ -265,7 +295,7 @@ async function main(): Promise<void> {
 	for (const phase of phases) {
 		const rows = buildImportRows(phase, idByLabel);
 		const replace = phase.table === "rooms" || phase.table === "users";
-		runConvexImport(phase.table, rows, replace);
+		runConvexImport(phase.table, rows, replace, deployment);
 		for (const [label, id] of await readBackLabels(client, phase, idByLabel)) {
 			idByLabel.set(label, id);
 		}
