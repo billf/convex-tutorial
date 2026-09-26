@@ -524,3 +524,24 @@ test("computeParity reproduces the vendored corpus/v1.parity.json for every vect
 		}
 	}
 });
+
+// M3 regression: every vector's declared base message creationTime must
+// agree with the same message's declared expectedBase creationTime. Neither
+// the convex-test path (creationTime is stripped before comparison) nor
+// computeParity (creationTime is dropped from the hash) would ever catch a
+// disagreement here -- this is a plain data-consistency check on the corpus
+// JSON itself, independent of any Convex query.
+test("corpus: base and expectedBase declared creationTime agree for every message, in every vector", () => {
+	for (const [key, vector] of Object.entries(corpus.vectors)) {
+		const baseCreationTimeByLabel = new Map(
+			(vector.base as BaseOp[])
+				.filter((op): op is BaseOp & { op: "insertMessage" } => op.op === "insertMessage")
+				.map((op) => [op.label, op.creationTime]),
+		);
+		for (const row of (vector.expectedBase ?? []) as { id: string; creationTime: number }[]) {
+			const declared = baseCreationTimeByLabel.get(row.id);
+			if (declared === undefined) continue;
+			expect(declared, `${key}: expectedBase "${row.id}" creationTime`).toBe(row.creationTime);
+		}
+	}
+});
