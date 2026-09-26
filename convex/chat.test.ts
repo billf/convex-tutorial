@@ -6,6 +6,16 @@ import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
 
+// Branch-review BR3: getMessages's `if (room === null) return []` guard
+// (the case before any message has ever been sent, on a genuinely fresh
+// deployment) was never exercised by any prior test -- every other case
+// calls sendMessage first, which lazily creates the room.
+test("getMessages returns [] on a fresh deployment, before any room exists", async () => {
+	const t = convexTest(schema, modules);
+	const messages = await t.query(api.chat.getMessages, {});
+	expect(messages).toEqual([]);
+});
+
 test("getOrCreateUser is idempotent and distinguishes different names", async () => {
 	const t = convexTest(schema, modules);
 
