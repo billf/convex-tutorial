@@ -151,7 +151,11 @@ function runConvexImport(
 		const args = ["convex", "import", "--deployment", deployment, "--table", table, "--yes"];
 		if (replace) args.push("--replace");
 		args.push(file);
-		execFileSync("npx", args, { stdio: "inherit" });
+		// BR5: no timeout previously meant a hang (network partition, a
+		// stalled npx resolution, an interactive prompt this non-interactive
+		// caller can't answer) blocked the loader indefinitely with no
+		// recovery path.
+		execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
