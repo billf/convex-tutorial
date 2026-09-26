@@ -32,11 +32,14 @@ async function isActiveMember(
 	room: Id<"rooms">,
 	user: Id<"users">,
 ): Promise<boolean> {
-	const membership = await ctx.db
+	// by_room_user has no uniqueness guarantee, so a caller that races two
+	// membership inserts for the same (room, user) must not make this throw;
+	// treat the pair as active if any matching row is active.
+	const memberships = await ctx.db
 		.query("memberships")
 		.withIndex("by_room_user", (q) => q.eq("room", room).eq("user", user))
-		.unique();
-	return membership?.active ?? false;
+		.collect();
+	return memberships.some((membership) => membership.active);
 }
 
 // Oracle-only: `.collect().length` is fine for the canonical exact-answer
