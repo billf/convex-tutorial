@@ -14,8 +14,7 @@ const DEFAULT_ROOM_NAME = "general";
  * both see no room and both insert must not make a later lookup throw;
  * take the oldest matching row (the one actually chosen by the first
  * insert to win) instead of asserting exactly one exists. Shared by
- * getOrCreateDefaultRoom and getMessages (branch-review BR6: previously
- * written twice, once as insert-if-missing and once read-only).
+ * getOrCreateDefaultRoom and getMessages.
  */
 async function findDefaultRoom(ctx: QueryCtx): Promise<Doc<"rooms"> | undefined> {
 	const [existing] = await ctx.db
@@ -35,7 +34,7 @@ async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
 }
 
 /**
- * (branch-review BR8) Keeps demo/test chat traffic within the same
+ * Keeps demo/test chat traffic within the same
  * proof-vehicle membership model production-shaped traffic uses, rather
  * than a separate no-membership path: without this, `roomFeed` (which
  * requires an active membership) would silently exclude every message
