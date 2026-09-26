@@ -31,13 +31,16 @@
  * that deployment (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a
  * delta calls `fixture:reset`.
  *
- * The target deployment's rooms/users/memberships/messages/likes tables
- * must all be empty before running this (rooms/users import with
- * `--replace`; the rest do not, so a nonempty deployment risks a partial
- * import -- see `PROOF_VEHICLE_ALLOW_NONEMPTY` below). Reset first with
- * `npx convex run proofVehicle/fixture:reset '{}'` (requires
- * `PROOF_VEHICLE_FIXTURE=1` on that deployment) or point at a fresh
- * deployment. Set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to bypass this check.
+ * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
+ * import with `--replace`, which clears those tables entirely -- and
+ * convex/chat.ts (the live tutorial chat app) reads/writes those same
+ * tables. This loader refuses to run against any deployment where
+ * rooms/users/memberships/messages/likes already has rows (a `npm run dev`
+ * deployment always does, from its first chat message onward) unless
+ * `PROOF_VEHICLE_ALLOW_NONEMPTY=1` is set -- use a fresh/disposable
+ * deployment instead of setting it. Reset first with `npx convex run
+ * proofVehicle/fixture:reset '{}'` (requires `PROOF_VEHICLE_FIXTURE=1` on
+ * that deployment) if you do need to reuse one.
  *
  * NOTE: this script has not been run against a live deployment in this
  * environment (none was configured here); its phased-import and
@@ -219,6 +222,24 @@ async function readBackLabels(
 	return resolved;
 }
 
+/**
+ * Pure predicate behind the pre-import empty-target guard (M2 / BR1): which
+ * of the five proof-vehicle tables already have rows. Extracted so the
+ * guard's actual decision logic is unit-testable without a live deployment
+ * -- the query calls that produce its input cannot be.
+ */
+export function computeNonEmptyTables(tables: {
+	rooms: readonly unknown[];
+	users: readonly unknown[];
+	memberships: readonly unknown[];
+	likes: readonly unknown[];
+	messages: readonly unknown[];
+}): string[] {
+	return (Object.keys(tables) as (keyof typeof tables)[]).filter(
+		(table) => tables[table].length > 0,
+	);
+}
+
 async function main(): Promise<void> {
 	const vectorId = process.argv[2];
 	if (vectorId === undefined || !(vectorId in corpus.vectors)) {
@@ -269,31 +290,50 @@ async function main(): Promise<void> {
 		);
 	}
 
-	// M2: only rooms/users import with --replace; memberships/messages/likes
-	// use import's default requireEmpty mode. Without this guard, a second
-	// vector load (or a vector switch) on the same deployment replaces
-	// rooms/users, then fails on the first nonempty non-replaced table --
-	// leaving the deployment partially modified. Require every proof-vehicle
-	// table empty up front (an explicit fresh target) unless the operator
-	// opts in with PROOF_VEHICLE_ALLOW_NONEMPTY=1.
+	// M2 (also closes branch-review BR1): only rooms/users import with
+	// --replace, which clears the ENTIRE table, not just proof-vehicle rows.
+	// rooms/users are the SAME tables convex/chat.ts (the live tutorial app)
+	// reads and writes via getOrCreateDefaultRoom/getOrCreateUser -- running
+	// this loader against the same deployment `npm run dev` uses would
+	// silently delete every real chat room and user with no confirmation
+	// prompt. Refusing to run at all when rooms/users (or any proof-vehicle
+	// table) already has rows -- which a `npm run dev`-populated deployment
+	// always will, since the first chat message lazily creates a room and
+	// user -- makes that scenario fail loudly instead of silently, without
+	// requiring the loader to know which rows are "its own" (KTD8's schema
+	// has no proof-vehicle-specific ownership marker to scope a narrower
+	// delete by). Bypass: PROOF_VEHICLE_ALLOW_NONEMPTY=1, for a deployment
+	// the operator has explicitly decided is disposable.
 	if (process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
-		const nonEmptyTables: string[] = [];
-		for (const table of ["rooms", "users", "memberships", "likes"] as const) {
-			const rows = await client.query(
+		const nonEmptyTables = computeNonEmptyTables({
+			rooms: await client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:rooms"),
+				{},
+			),
+			users: await client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:users"),
+				{},
+			),
+			memberships: await client.query(
 				makeFunctionReference<"query", Record<string, never>, unknown[]>(
-					`proofVehicle/tables:${table}`,
+					"proofVehicle/tables:memberships",
 				),
 				{},
-			);
-			if (rows.length > 0) nonEmptyTables.push(table);
-		}
-		if (existingMessages.length > 0) nonEmptyTables.push("messages");
+			),
+			likes: await client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
+				{},
+			),
+			messages: existingMessages,
+		});
 		if (nonEmptyTables.length > 0) {
 			throw new Error(
 				`non-empty-target: this deployment already has rows in [${nonEmptyTables.join(", ")}]. ` +
-					"A partial import (--replace on rooms/users only) would leave the deployment in a " +
-					"mixed state. Use a fresh deployment, run `proofVehicle/fixture:reset` first, or set " +
-					"PROOF_VEHICLE_ALLOW_NONEMPTY=1 to bypass this check.",
+					"Running this loader here would either replace live rooms/users data (if this is the " +
+					"deployment `npm run dev` uses) or leave a partial import (--replace on rooms/users " +
+					"only, requireEmpty on the rest). Use a fresh/disposable deployment, run " +
+					"`proofVehicle/fixture:reset` first, or set PROOF_VEHICLE_ALLOW_NONEMPTY=1 to bypass " +
+					"this check.",
 			);
 		}
 	}
