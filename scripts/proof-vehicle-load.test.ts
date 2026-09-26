@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
 	buildImportRows,
+	computeNonEmptyTables,
 	legacyMessagesPresent,
 	naturalKey,
 	planImportPhases,
@@ -84,6 +85,30 @@ test("corpus: every vector's base ops have unique natural keys, per table", () =
 			}
 		}
 	}
+});
+
+test("computeNonEmptyTables returns [] when every table is empty", () => {
+	expect(
+		computeNonEmptyTables({ rooms: [], users: [], memberships: [], likes: [], messages: [] }),
+	).toEqual([]);
+});
+
+// Branch-review BR1: rooms/users import with --replace, and convex/chat.ts
+// (the live tutorial app) shares those exact tables. A `npm run dev`
+// -populated deployment always has rooms/users rows (the first chat message
+// lazily creates one of each) well before it has any proof-vehicle
+// memberships/messages/likes rows -- this is the specific shape the guard
+// must catch to prevent the loader from silently wiping live chat data.
+test("computeNonEmptyTables (BR1): flags a deployment with only live chat rooms/users populated", () => {
+	expect(
+		computeNonEmptyTables({
+			rooms: [{ name: "general" }],
+			users: [{ name: "Ada" }],
+			memberships: [],
+			likes: [],
+			messages: [],
+		}),
+	).toEqual(["rooms", "users"]);
 });
 
 test("buildImportRows offsets messages' _creationTime from a fixed epoch base", () => {
