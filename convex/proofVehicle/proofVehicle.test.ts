@@ -61,6 +61,23 @@ const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
 	membershipAndLikesTxn: mutationRef("proofVehicle/mutations:membershipAndLikesTxn"),
 };
 
+// The affectedIds key a delta's `label` should bind to, per mutation. Needed
+// because Convex's returns validator does not promise to preserve the
+// handler's object-literal key order (membershipAndLikesTxn's {membership,
+// like} does not survive round-trip in insertion order), so a delta's label
+// cannot be bound positionally -- it must name the key explicitly.
+const LABEL_BIND_KEY: Record<string, string> = {
+	sendMessage: "message",
+	updateMessageBody: "message",
+	deleteMessage: "message",
+	renameUser: "user",
+	deleteUser: "user",
+	setMembershipActive: "membership",
+	addLike: "like",
+	removeLike: "like",
+	membershipAndLikesTxn: "like",
+};
+
 const fixtureMarker = makeFunctionReference<"mutation", Record<string, never>, { marker: number }>(
 	"proofVehicle/fixture:marker",
 );
@@ -302,10 +319,14 @@ async function applyDelta(
 	if (ref === undefined) throw new Error(`applyDelta: unknown mutation "${delta.mutation}"`);
 	const ack = await t.mutation(ref, resolveArgs(delta.args, idByLabel));
 	if (delta.label !== undefined) {
-		const [firstAffected] = Object.values(ack.affectedIds);
-		if (firstAffected !== undefined) {
-			idByLabel.set(delta.label, firstAffected as Id<TableNames>);
+		const bindKey = LABEL_BIND_KEY[delta.mutation];
+		const bound = bindKey !== undefined ? ack.affectedIds[bindKey] : undefined;
+		if (bound === undefined) {
+			throw new Error(
+				`applyDelta: no LABEL_BIND_KEY entry (or no matching affectedIds key) for mutation "${delta.mutation}"`,
+			);
 		}
+		idByLabel.set(delta.label, bound as Id<TableNames>);
 	}
 	return ack;
 }
@@ -383,13 +404,17 @@ test("V6's transaction leaves two like rows on a1, so its count before the membe
 	const t = convexTest(schema, modules);
 	const vector = corpus.vectors.V6;
 	const idByLabel = await runLoadBase(t, vector.base as BaseOp[]);
-	await applyDelta(t, idByLabel, vector.deltas[0]!);
+	const ack = await applyDelta(t, idByLabel, vector.deltas[0]!);
 
 	const messageA1 = idByLabel.get("a1");
 	const allLikes = await t.query(likes, {});
 	expect(allLikes.filter((like) => like.message === messageA1)).toHaveLength(2);
 	// The canonical feed (post membership-filter) shows Out() -- see the
 	// V6 test above, which asserts expectedAfterDelta[0] === [].
+
+	// M5 regression: label "l2" must bind to the new like row, not the
+	// patched membership row.
+	expect(idByLabel.get("l2")).toBe(ack.affectedIds["like"]);
 });
 
 test("each mutation's acks name the rows it wrote", async () => {
