@@ -117,14 +117,38 @@ function withoutCreationTime<T extends { _creationTime: number }>(row: T) {
 	return rest;
 }
 
-/** Resolves a delta's `args` (symbolic labels) to real ids/values via `idByLabel`. */
+// The arg keys each mutation expects an id (not a literal) for. resolveArgs
+// only rewrites these -- previously it rewrote ANY string arg that happened
+// to match a label, so a delta passing a literal body/name string equal to
+// some other row's label (corpus V2 already has both a user labeled "a" and
+// a message body "a") would have silently sent an id where a string was
+// expected.
+const ID_ARG_KEYS: Record<string, readonly string[]> = {
+	sendMessage: ["room", "sender"],
+	updateMessageBody: ["message"],
+	deleteMessage: ["message"],
+	renameUser: ["user"],
+	deleteUser: ["user"],
+	setMembershipActive: ["membership"],
+	addLike: ["message", "user"],
+	removeLike: ["like"],
+	membershipAndLikesTxn: ["membership", "message", "user"],
+};
+
+/** Resolves a delta's id-typed `args` (symbolic labels) to real ids via `idByLabel`; literal args pass through unchanged. */
 function resolveArgs(
+	mutationName: string,
 	args: Record<string, unknown>,
 	idByLabel: ReadonlyMap<string, Id<TableNames>>,
 ): Record<string, unknown> {
+	const idKeys = new Set(ID_ARG_KEYS[mutationName] ?? []);
 	const out: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(args)) {
-		out[key] = typeof value === "string" && idByLabel.has(value) ? idByLabel.get(value) : value;
+		if (idKeys.has(key) && typeof value === "string" && idByLabel.has(value)) {
+			out[key] = idByLabel.get(value);
+		} else {
+			out[key] = value;
+		}
 	}
 	return out;
 }
@@ -271,6 +295,26 @@ test("the oracle scopes messages to their own room", async () => {
 	expect(feedB[0].body).toBe("b");
 });
 
+test("M6 regression: resolveArgs does not rewrite a literal body arg that collides with a label", async () => {
+	const t = convexTest(schema, modules);
+	// Deliberately label the user "a" and send a message whose body is also
+	// the literal string "a" -- before the fix, resolveArgs would rewrite
+	// the body arg to the user's id (since "a" is a bound label), which
+	// fails the mutation's `body: v.string()` validator.
+	const idByLabel = await runLoadBase(t, [
+		{ op: "insertRoom", label: "r", name: "room" },
+		{ op: "insertUser", label: "a", name: "Ada" },
+	]);
+	const ack = await applyDelta(t, idByLabel, {
+		mutation: "sendMessage",
+		args: { room: "r", sender: "a", body: "a" },
+		label: "msg",
+	});
+	const messageId = ack.affectedIds["message"] as Id<"messages">;
+	const stored = await t.run((ctx) => ctx.db.get("messages", messageId));
+	expect(stored?.body).toBe("a");
+});
+
 test("allSelectedRows returns every row, each tagged with its table, including the marker row", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user } = await seedRoomWithMember(t);
@@ -317,7 +361,7 @@ async function applyDelta(
 ): Promise<Ack> {
 	const ref = MUTATIONS[delta.mutation];
 	if (ref === undefined) throw new Error(`applyDelta: unknown mutation "${delta.mutation}"`);
-	const ack = await t.mutation(ref, resolveArgs(delta.args, idByLabel));
+	const ack = await t.mutation(ref, resolveArgs(delta.mutation, delta.args, idByLabel));
 	if (delta.label !== undefined) {
 		const bindKey = LABEL_BIND_KEY[delta.mutation];
 		const bound = bindKey !== undefined ? ack.affectedIds[bindKey] : undefined;
