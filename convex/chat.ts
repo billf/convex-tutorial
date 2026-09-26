@@ -34,6 +34,33 @@ async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
 	return await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
 }
 
+/**
+ * (branch-review BR8) Keeps demo/test chat traffic within the same
+ * proof-vehicle membership model production-shaped traffic uses, rather
+ * than a separate no-membership path: without this, `roomFeed` (which
+ * requires an active membership) would silently exclude every message
+ * sent through the live tutorial UI. Same by_room_user non-uniqueness
+ * caveat as other lookups in this file: take the oldest matching row
+ * instead of asserting exactly one exists, and only patch when the
+ * existing row isn't already active.
+ */
+async function ensureActiveMembership(
+	ctx: MutationCtx,
+	room: Id<"rooms">,
+	user: Id<"users">,
+): Promise<void> {
+	const [existing] = await ctx.db
+		.query("memberships")
+		.withIndex("by_room_user", (q) => q.eq("room", room).eq("user", user))
+		.order("asc")
+		.take(1);
+	if (existing === undefined) {
+		await ctx.db.insert("memberships", { room, user, active: true });
+	} else if (!existing.active) {
+		await ctx.db.patch("memberships", existing._id, { active: true });
+	}
+}
+
 export const sendMessage = mutation({
 	args: {
 		user: v.id("users"),
@@ -42,6 +69,7 @@ export const sendMessage = mutation({
 	returns: v.null(),
 	handler: async (ctx, args) => {
 		const room = await getOrCreateDefaultRoom(ctx);
+		await ensureActiveMembership(ctx, room, args.user);
 		await ctx.db.insert("messages", {
 			room,
 			sender: args.user,
