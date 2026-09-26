@@ -27,10 +27,9 @@ export const sendMessage = mutation({
 	},
 });
 
-// Delegates to fixture.ts's patchMessageBodyImpl: this mutation and
-// proofVehicle/fixture:patchMessageBody were previously byte-identical,
-// separately-maintained handlers (u5 review M8); sharing one implementation
-// means they can no longer silently drift apart.
+// Delegates to fixture.ts's patchMessageBodyImpl so this mutation and
+// proofVehicle/fixture:patchMessageBody share one implementation and
+// cannot silently drift apart.
 export const updateMessageBody = mutation({
 	args: { message: v.id("messages"), body: v.string() },
 	returns: v.object({
