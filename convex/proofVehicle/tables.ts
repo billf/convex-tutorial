@@ -40,12 +40,17 @@ export const likes = query({
 /**
  * The harness-only marker sequence row (KTD4), for separate-session
  * sources that cannot read a mutation's own commit timestamp. `null`
- * before `proofVehicle/fixture:marker` first runs.
+ * before `proofVehicle/fixture:marker` first runs. Reads the most recent
+ * row rather than asserting exactly one so a leftover/double-run marker
+ * degrades to "latest" instead of throwing.
  */
 export const markers = query({
 	args: {},
 	returns: v.union(v.null(), schema.doc("proofVehicleMarkers")),
-	handler: async (ctx) => ctx.db.query("proofVehicleMarkers").unique(),
+	handler: async (ctx) => {
+		const rows = await ctx.db.query("proofVehicleMarkers").order("desc").take(1);
+		return rows[0] ?? null;
+	},
 });
 
 const taggedRow = v.union(
