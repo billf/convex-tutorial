@@ -481,6 +481,35 @@ test("each mutation's acks name the rows it wrote", async () => {
 	expect(storedLike?.message).toBe(messageId);
 });
 
+// Branch-review BR4: updateMessageBody and renameUser are registered in
+// MUTATIONS but no corpus delta or prior test ever invokes either, so
+// neither had any test evidence of behaving as documented.
+test("updateMessageBody and renameUser patch the row they name", async () => {
+	const t = convexTest(schema, modules);
+	const idByLabel = await runLoadBase(t, corpus.vectors.V3.base as BaseOp[]);
+	const a = idByLabel.get("a") as Id<"users">;
+
+	const sendAck = await t.mutation(MUTATIONS.sendMessage!, {
+		room: idByLabel.get("r"),
+		sender: a,
+		body: "before",
+	});
+	const messageId = sendAck.affectedIds["message"] as Id<"messages">;
+
+	const updateAck = await t.mutation(MUTATIONS.updateMessageBody!, {
+		message: messageId,
+		body: "after",
+	});
+	expect(updateAck.affectedIds["message"]).toBe(messageId);
+	const updatedMessage = await t.run((ctx) => ctx.db.get("messages", messageId));
+	expect(updatedMessage?.body).toBe("after");
+
+	const renameAck = await t.mutation(MUTATIONS.renameUser!, { user: a, name: "Renamed" });
+	expect(renameAck.affectedIds["user"]).toBe(a);
+	const renamedUser = await t.run((ctx) => ctx.db.get("users", a));
+	expect(renamedUser?.name).toBe("Renamed");
+});
+
 test("fixture:reset refuses to run without the PROOF_VEHICLE_FIXTURE guard", async () => {
 	const t = convexTest(schema, modules);
 	await seedRoomWithMember(t);
