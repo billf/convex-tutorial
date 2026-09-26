@@ -39,6 +39,9 @@ async function isActiveMember(
 	return membership?.active ?? false;
 }
 
+// Oracle-only: `.collect().length` is fine for the canonical exact-answer
+// feed, but do not copy this into a production like-count query — maintain
+// a denormalized counter or use the aggregate component instead.
 async function likeCountFor(ctx: QueryCtx, message: Id<"messages">): Promise<number> {
 	const likes = await ctx.db
 		.query("likes")
