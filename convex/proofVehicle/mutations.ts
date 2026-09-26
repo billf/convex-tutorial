@@ -9,7 +9,7 @@
 
 import { mutation } from "../_generated/server";
 import { v } from "convex/values";
-import { bumpMarker } from "./fixture";
+import { bumpMarker, patchMessageBodyImpl } from "./fixture";
 
 export const sendMessage = mutation({
 	args: { room: v.id("rooms"), sender: v.id("users"), body: v.string() },
@@ -27,16 +27,17 @@ export const sendMessage = mutation({
 	},
 });
 
+// Delegates to fixture.ts's patchMessageBodyImpl: this mutation and
+// proofVehicle/fixture:patchMessageBody were previously byte-identical,
+// separately-maintained handlers (u5 review M8); sharing one implementation
+// means they can no longer silently drift apart.
 export const updateMessageBody = mutation({
 	args: { message: v.id("messages"), body: v.string() },
 	returns: v.object({
 		affectedIds: v.object({ message: v.id("messages") }),
 		marker: v.number(),
 	}),
-	handler: async (ctx, args) => {
-		await ctx.db.patch("messages", args.message, { body: args.body });
-		return { affectedIds: { message: args.message }, marker: await bumpMarker(ctx) };
-	},
+	handler: patchMessageBodyImpl,
 });
 
 export const deleteMessage = mutation({

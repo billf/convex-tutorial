@@ -68,20 +68,31 @@ export const reset = mutation({
 });
 
 /**
+ * Shared by `patchMessageBody` (this file's V4 post-bind fixture step) and
+ * `proofVehicle/mutations:updateMessageBody` (the general Q13 delta
+ * mutation): the two were previously byte-identical, separately-maintained
+ * handlers with no code link between them, so a one-sided future edit could
+ * silently diverge them. `ctx.db.patch` never touches `_creationTime`
+ * (system-assigned at insert, `crates/database/src/transaction.rs:583`),
+ * which is exactly the invariant V4's tie depends on.
+ */
+export async function patchMessageBodyImpl(
+	ctx: MutationCtx,
+	args: { message: Id<"messages">; body: string },
+): Promise<{ affectedIds: { message: Id<"messages"> }; marker: number }> {
+	await ctx.db.patch("messages", args.message, { body: args.body });
+	return { affectedIds: { message: args.message }, marker: await bumpMarker(ctx) };
+}
+
+/**
  * V4's post-bind body patch: after the deployment loader's phased import
  * assigns real IDs to the tied m50/m51 rows, this patches each placeholder
- * body to `message-<bound label>`. `ctx.db.patch` never touches
- * `_creationTime` (system-assigned at insert,
- * `crates/database/src/transaction.rs:583`), which is exactly the
- * invariant the tie depends on.
+ * body to `message-<bound label>`.
  */
 export const patchMessageBody = mutation({
 	args: { message: v.id("messages"), body: v.string() },
 	returns: v.object({ affectedIds: v.object({ message: v.id("messages") }), marker: v.number() }),
-	handler: async (ctx, args) => {
-		await ctx.db.patch("messages", args.message, { body: args.body });
-		return { affectedIds: { message: args.message }, marker: await bumpMarker(ctx) };
-	},
+	handler: patchMessageBodyImpl,
 });
 
 // --- convex-test-side loading and parity (no Convex function wrapper: pure
