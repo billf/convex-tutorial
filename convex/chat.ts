@@ -1,7 +1,7 @@
 import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
-import type { Id } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx, QueryCtx } from "./_generated/server";
 import schema from "./schema";
 
 // KTD8: messages moved from {user, body} to {room, sender, body}.
@@ -9,16 +9,25 @@ import schema from "./schema";
 // {user, body} call shape (src/App.tsx) needs no change.
 const DEFAULT_ROOM_NAME = "general";
 
-async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
-	// by_name has no uniqueness guarantee, so two racing sendMessage calls
-	// that both see no room and both insert must not make later lookups
-	// throw; take the oldest matching row (the one actually chosen by the
-	// first insert to win) instead of asserting exactly one exists.
+/**
+ * by_name has no uniqueness guarantee, so two racing sendMessage calls that
+ * both see no room and both insert must not make a later lookup throw;
+ * take the oldest matching row (the one actually chosen by the first
+ * insert to win) instead of asserting exactly one exists. Shared by
+ * getOrCreateDefaultRoom and getMessages (branch-review BR6: previously
+ * written twice, once as insert-if-missing and once read-only).
+ */
+async function findDefaultRoom(ctx: QueryCtx): Promise<Doc<"rooms"> | undefined> {
 	const [existing] = await ctx.db
 		.query("rooms")
 		.withIndex("by_name", (q) => q.eq("name", DEFAULT_ROOM_NAME))
 		.order("asc")
 		.take(1);
+	return existing;
+}
+
+async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
+	const existing = await findDefaultRoom(ctx);
 	if (existing !== undefined) {
 		return existing._id;
 	}
@@ -49,13 +58,7 @@ export const getMessages = query({
 	handler: async (ctx) => {
 		// getMessages is a query and cannot insert, so it returns [] before
 		// the default room exists (i.e. before any message has been sent).
-		// Same by_name non-uniqueness caveat as getOrCreateDefaultRoom: take
-		// the oldest matching row instead of asserting exactly one exists.
-		const [room] = await ctx.db
-			.query("rooms")
-			.withIndex("by_name", (q) => q.eq("name", DEFAULT_ROOM_NAME))
-			.order("asc")
-			.take(1);
+		const room = await findDefaultRoom(ctx);
 		if (room === undefined) {
 			return [];
 		}
