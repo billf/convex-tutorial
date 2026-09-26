@@ -18,6 +18,14 @@
  * on it (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a delta calls
  * `fixture:reset`.
  *
+ * The target deployment's rooms/users/memberships/messages/likes tables
+ * must all be empty before running this (rooms/users import with
+ * `--replace`; the rest do not, so a nonempty deployment risks a partial
+ * import -- see `PROOF_VEHICLE_ALLOW_NONEMPTY` below). Reset first with
+ * `npx convex run proofVehicle/fixture:reset '{}'` (requires
+ * `PROOF_VEHICLE_FIXTURE=1` on that deployment) or point at a fresh
+ * deployment. Set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to bypass this check.
+ *
  * NOTE: this script has not been run against a live deployment in this
  * environment (none was configured here); its phased-import and
  * label-binding logic is exercised structurally by this file's own unit
@@ -138,7 +146,7 @@ function runConvexImport(table: string, rows: Record<string, unknown>[], replace
  * V6's delta later adds a second one via a mutation call that returns its
  * own id directly, needing no read-back).
  */
-function naturalKey(op: BaseOp, idByLabel: ReadonlyMap<string, string>): string {
+export function naturalKey(op: BaseOp, idByLabel: ReadonlyMap<string, string>): string {
 	const resolve = (label: string) => idByLabel.get(label) ?? label;
 	switch (op.op) {
 		case "insertRoom":
@@ -219,6 +227,35 @@ async function main(): Promise<void> {
 			"legacy-messages-present: this deployment has a pre-migration messages row " +
 				"(missing `room`); use a fresh local deployment or clear `messages` first.",
 		);
+	}
+
+	// M2: only rooms/users import with --replace; memberships/messages/likes
+	// use import's default requireEmpty mode. Without this guard, a second
+	// vector load (or a vector switch) on the same deployment replaces
+	// rooms/users, then fails on the first nonempty non-replaced table --
+	// leaving the deployment partially modified. Require every proof-vehicle
+	// table empty up front (an explicit fresh target) unless the operator
+	// opts in with PROOF_VEHICLE_ALLOW_NONEMPTY=1.
+	if (process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
+		const nonEmptyTables: string[] = [];
+		for (const table of ["rooms", "users", "memberships", "likes"] as const) {
+			const rows = await client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					`proofVehicle/tables:${table}`,
+				),
+				{},
+			);
+			if (rows.length > 0) nonEmptyTables.push(table);
+		}
+		if (existingMessages.length > 0) nonEmptyTables.push("messages");
+		if (nonEmptyTables.length > 0) {
+			throw new Error(
+				`non-empty-target: this deployment already has rows in [${nonEmptyTables.join(", ")}]. ` +
+					"A partial import (--replace on rooms/users only) would leave the deployment in a " +
+					"mixed state. Use a fresh deployment, run `proofVehicle/fixture:reset` first, or set " +
+					"PROOF_VEHICLE_ALLOW_NONEMPTY=1 to bypass this check.",
+			);
+		}
 	}
 
 	const vector = corpus.vectors[vectorId as keyof typeof corpus.vectors];

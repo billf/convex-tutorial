@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
 	buildImportRows,
 	legacyMessagesPresent,
+	naturalKey,
 	planImportPhases,
 } from "./proof-vehicle-load";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
@@ -47,6 +48,42 @@ test("buildImportRows throws on an unbound label", () => {
 		(op): op is Extract<BaseOp, { op: "insertMembership" }> => op.op === "insertMembership",
 	) };
 	expect(() => buildImportRows(phase, new Map())).toThrow(/unbound label/);
+});
+
+// u5 review M2: readBackLabels binds an imported row back to its corpus
+// label via naturalKey (name/body/FK-pair), with no enforced uniqueness. A
+// future corpus edit that introduces a within-vector duplicate would
+// silently mis-bind a label instead of failing loudly. This lints every
+// vector's *base* ops (grouped by table, since naturalKey collisions only
+// matter within one readBackLabels() call) for that today.
+test("corpus: every vector's base ops have unique natural keys, per table", () => {
+	for (const [vectorKey, vector] of Object.entries(corpus.vectors)) {
+		const byTable = new Map<string, string[]>();
+		for (const op of vector.base as BaseOp[]) {
+			const table =
+				op.op === "insertRoom"
+					? "rooms"
+					: op.op === "insertUser"
+						? "users"
+						: op.op === "insertMembership"
+							? "memberships"
+							: op.op === "insertMessage"
+								? "messages"
+								: "likes";
+			const keys = byTable.get(table) ?? [];
+			keys.push(naturalKey(op, new Map()));
+			byTable.set(table, keys);
+		}
+		for (const [table, keys] of byTable) {
+			const seen = new Set<string>();
+			for (const key of keys) {
+				expect(seen.has(key), `${vectorKey}.${table}: duplicate natural key "${key}"`).toBe(
+					false,
+				);
+				seen.add(key);
+			}
+		}
+	}
 });
 
 test("buildImportRows offsets messages' _creationTime from a fixed epoch base", () => {
