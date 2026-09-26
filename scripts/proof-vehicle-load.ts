@@ -11,9 +11,8 @@
  * (a harness, or a human) never has to infer real IDs.
  *
  * Does NOT perform V4's post-bind body patch (`proofVehicle/fixture:
- * patchMessageBody`): m50/m51's bodies import verbatim from the corpus (u5
- * review M4 -- this doc comment previously overclaimed the patch step; it
- * did not exist in main()). That means the m50/m51 *label binding* is
+ * patchMessageBody`): m50/m51's bodies import verbatim from the corpus.
+ * That means the m50/m51 *label binding* is
  * correct (bodies are distinct per-op strings), but the literal
  * m51-before-m50 _creationTime tie order this loader is supposed to prove
  * is NOT established by this script alone: nothing here enforces which of
@@ -151,10 +150,9 @@ function runConvexImport(
 		const args = ["convex", "import", "--deployment", deployment, "--table", table, "--yes"];
 		if (replace) args.push("--replace");
 		args.push(file);
-		// BR5: no timeout previously meant a hang (network partition, a
-		// stalled npx resolution, an interactive prompt this non-interactive
-		// caller can't answer) blocked the loader indefinitely with no
-		// recovery path.
+		// A stalled subprocess (network partition, stalled npx resolution,
+		// an interactive prompt this non-interactive caller can't answer)
+		// must not block the loader indefinitely: time out after 120s.
 		execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -257,17 +255,16 @@ async function main(): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	// M1: the read client (ConvexHttpClient, above) and the write path
+	// The read client (ConvexHttpClient, above) and the write path
 	// (`npx convex import`, below) must name the same deployment
-	// explicitly -- previously the import subprocess passed no deployment
-	// flag at all, so it silently used the CLI's own default resolution
-	// (the project's dev deployment), which is only guaranteed to match
-	// CONVEX_URL by operator discipline, not by anything this script
-	// checked. CONVEX_DEPLOYMENT is the identifier `npx convex import`
-	// itself accepts via --deployment; requiring it removes the implicit
-	// default, but does not prove it names the same deployment CONVEX_URL
-	// points at -- see this commit's message for why that stronger check
-	// isn't implemented here.
+	// explicitly: without an explicit flag the import would silently use
+	// the CLI's own default resolution (the project's dev deployment),
+	// which is only guaranteed to match CONVEX_URL by operator
+	// discipline, not by anything this script checks. CONVEX_DEPLOYMENT is
+	// the identifier `npx convex import` itself accepts via --deployment;
+	// requiring it removes the implicit default, but does not prove it
+	// names the same deployment CONVEX_URL points at -- see this commit's
+	// message for why that stronger check isn't implemented here.
 	const deployment = process.env["CONVEX_DEPLOYMENT"];
 	if (deployment === undefined) {
 		console.error(
@@ -294,8 +291,8 @@ async function main(): Promise<void> {
 		);
 	}
 
-	// M2 (also closes branch-review BR1): only rooms/users import with
-	// --replace, which clears the ENTIRE table, not just proof-vehicle rows.
+	// Only rooms/users import with --replace, which clears the ENTIRE
+	// table, not just proof-vehicle rows.
 	// rooms/users are the SAME tables convex/chat.ts (the live tutorial app)
 	// reads and writes via getOrCreateDefaultRoom/getOrCreateUser -- running
 	// this loader against the same deployment `npm run dev` uses would
@@ -309,25 +306,33 @@ async function main(): Promise<void> {
 	// delete by). Bypass: PROOF_VEHICLE_ALLOW_NONEMPTY=1, for a deployment
 	// the operator has explicitly decided is disposable.
 	if (process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
-		const nonEmptyTables = computeNonEmptyTables({
-			rooms: await client.query(
+		// Independent preflight reads: fetch concurrently, then apply the
+		// same guard predicate to the same keyed inputs.
+		const [rooms, users, memberships, likes] = await Promise.all([
+			client.query(
 				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:rooms"),
 				{},
 			),
-			users: await client.query(
+			client.query(
 				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:users"),
 				{},
 			),
-			memberships: await client.query(
+			client.query(
 				makeFunctionReference<"query", Record<string, never>, unknown[]>(
 					"proofVehicle/tables:memberships",
 				),
 				{},
 			),
-			likes: await client.query(
+			client.query(
 				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
 				{},
 			),
+		]);
+		const nonEmptyTables = computeNonEmptyTables({
+			rooms,
+			users,
+			memberships,
+			likes,
 			messages: existingMessages,
 		});
 		if (nonEmptyTables.length > 0) {
