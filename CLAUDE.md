@@ -39,29 +39,63 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
   and deploys — it will report false errors on `convex/*.test.ts`. The root
   `tsconfig.json` covers `src/`, `convex/`, and `vite.config.mts` together
   and is the correct one to check against during development.
+- `npm run proof-vehicle-load <V1|V2|V3|V4|V5|V6>` — loads one corpus
+  vector from `convex/proofVehicle/corpus/v1.json` into a real Convex
+  deployment (see `scripts/proof-vehicle-load.ts`'s own header for
+  required env vars). **Never point this at the deployment `npm run dev`
+  uses** — it refuses to run against any deployment where
+  rooms/users/memberships/messages/likes already has rows, specifically
+  because rooms/users import with `--replace` and those are the same
+  tables this app's own chat functions read and write.
 
 ## Architecture
 
 **Backend (`convex/`)**: schema + server functions, deployed by Convex.
-- `schema.ts` defines two tables: `messages` (`user: v.id("users")`, `body`,
-  indexed `by_user`) and `users` (`name`, indexed `by_name`). Messages store
-  a reference to a user document, not a raw display-name string.
-- `chat.ts` has the three functions the client calls:
+- `schema.ts` defines the shared proof-vehicle contract's five tables —
+  `rooms` (`name`, indexed `by_name`), `users` (`name`, indexed `by_name`),
+  `memberships` (`room`, `user`, `active`, indexed `by_room_user`),
+  `messages` (`room`, `sender: v.id("users")`, `body`, indexed `by_room`
+  and `by_sender`), `likes` (`message`, `user`, indexed `by_message`) —
+  plus a harness-only `proofVehicleMarkers` table (a single sequence-number
+  row a separate-session test source can poll). This replaced an earlier
+  two-table `{messages, users}` schema; the migration is breaking (no
+  backfill), which is fine for this tutorial's ephemeral data but should
+  not be copied as a production migration pattern.
+- `chat.ts` has the three functions the client calls, preserving that
+  earlier `{user, body}` shape so `src/App.tsx` needs no change:
   - `getOrCreateUser` (mutation) — looks up a user by name via the
     `by_name` index, or inserts a new one. This is how a freshly-generated
     client display name becomes a real `users` row/id on first load.
-  - `sendMessage` (mutation) — inserts a message tied to a `users` id.
-  - `getMessages` (query) — reads the latest 50 messages and resolves each
-    message's sender name server-side (batched by unique user id, not a
-    per-row lookup) so the client never needs its own join.
+  - `sendMessage` (mutation) — lazily creates (or finds) a single default
+    room named `"general"` the first time it's called, then inserts a
+    message tied to that room and the given user id.
+  - `getMessages` (query) — reads the latest 50 messages in the default
+    room and resolves each message's sender name server-side (batched by
+    unique user id, not a per-row lookup) so the client never needs its
+    own join; returns `[]` before any message has ever been sent (the
+    default room doesn't exist yet, and a query can't create it).
   - All three declare explicit `returns` validators, following the
     project's Convex guideline of always validating both `args` and
     `returns`.
+- `convex/proofVehicle/` is a separate, isolated namespace implementing a
+  correctness-oracle test harness on top of the same schema: `feed.ts` (the
+  canonical room-feed query other implementations are checked against),
+  `tables.ts` (plain per-table reads), `mutations.ts` (nine deterministic
+  mutations), `fixture.ts` (marker sequence, guarded reset, shared patch
+  logic), and `corpus/v1.json`/`v1.parity.json` (six hand-authored test
+  vectors plus golden hashes). It does not affect `chat.ts`'s behavior, but
+  shares its tables — notably, live chat traffic through `sendMessage`
+  currently creates no `memberships` row, so demo messages sent via the UI
+  are invisible to `proofVehicle/feed:roomFeed`'s active-membership filter.
+  `scripts/proof-vehicle-load.ts` loads a corpus vector into a real
+  deployment (see the Commands section above); it has not been run
+  end-to-end in this environment.
 - `_generated/` is Convex codegen (`api.d.ts`, `dataModel.d.ts`, server
   helpers) — regenerated automatically by `convex dev`; don't hand-edit it.
   `_generated/ai/` is the separate ai-files vendor output described above.
-- `chat.test.ts` uses `convex-test` for hermetic backend tests against an
-  in-memory Convex instance (no real deployment needed).
+- `chat.test.ts` and `convex/proofVehicle/*.test.ts` use `convex-test` for
+  hermetic backend tests against an in-memory Convex instance (no real
+  deployment needed).
 
 **Frontend (`src/`)**:
 - `App.tsx` is the whole chat UI. On mount it resolves a per-session display
