@@ -86,7 +86,7 @@ test("the oracle computes an exact likeCount", async () => {
 	);
 	const liker1 = await t.run((ctx) => ctx.db.insert("users", { name: "Liker1" }));
 	const liker2 = await t.run((ctx) => ctx.db.insert("users", { name: "Liker2" }));
-	await t.run((ctx) => ctx.db.insert("likes", { message: messageId, user: liker1 }));
+	const like1 = await t.run((ctx) => ctx.db.insert("likes", { message: messageId, user: liker1 }));
 	const like2 = await t.run((ctx) => ctx.db.insert("likes", { message: messageId, user: liker2 }));
 
 	let feed = await t.query(roomFeed, { room });
@@ -95,6 +95,10 @@ test("the oracle computes an exact likeCount", async () => {
 	await t.run((ctx) => ctx.db.delete("likes", like2));
 	feed = await t.query(roomFeed, { room });
 	expect(feed[0].likeCount).toBe(1);
+
+	await t.run((ctx) => ctx.db.delete("likes", like1));
+	feed = await t.query(roomFeed, { room });
+	expect(feed[0].likeCount).toBe(0);
 });
 
 test("the oracle orders descending by _creationTime and limits to 50", async () => {
@@ -132,11 +136,45 @@ test("roomFeedPrefix honors n", async () => {
 	expect(prefix50).toHaveLength(10);
 });
 
+test("roomFeedPrefix with n: 0 returns an empty feed", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	await t.run((ctx) => ctx.db.insert("messages", { room, sender: user, body: "hi" }));
+
+	const prefix0 = await t.query(roomFeedPrefix, { room, n: 0 });
+	expect(prefix0).toHaveLength(0);
+});
+
 test("roomFeedPrefix rejects n outside [0, 50]", async () => {
 	const t = convexTest(schema, modules);
 	const { room } = await seedRoomWithMember(t);
 	await expect(t.query(roomFeedPrefix, { room, n: 51 })).rejects.toThrow();
 	await expect(t.query(roomFeedPrefix, { room, n: -1 })).rejects.toThrow();
+});
+
+test("roomFeedPrefix rejects non-integer and NaN n", async () => {
+	const t = convexTest(schema, modules);
+	const { room } = await seedRoomWithMember(t);
+	await expect(t.query(roomFeedPrefix, { room, n: 3.5 })).rejects.toThrow();
+	await expect(t.query(roomFeedPrefix, { room, n: NaN })).rejects.toThrow();
+});
+
+test("the oracle scopes messages to their own room", async () => {
+	const t = convexTest(schema, modules);
+	const { room: roomA, user: userA } = await seedRoomWithMember(t);
+	const roomB = await t.run((ctx) => ctx.db.insert("rooms", { name: "r2" }));
+	const userB = await t.run((ctx) => ctx.db.insert("users", { name: "Bob" }));
+	await t.run((ctx) => ctx.db.insert("memberships", { room: roomB, user: userB, active: true }));
+	await t.run((ctx) => ctx.db.insert("messages", { room: roomA, sender: userA, body: "a" }));
+	await t.run((ctx) => ctx.db.insert("messages", { room: roomB, sender: userB, body: "b" }));
+
+	const feedA = await t.query(roomFeed, { room: roomA });
+	expect(feedA).toHaveLength(1);
+	expect(feedA[0].body).toBe("a");
+
+	const feedB = await t.query(roomFeed, { room: roomB });
+	expect(feedB).toHaveLength(1);
+	expect(feedB[0].body).toBe("b");
 });
 
 test("allSelectedRows returns every row, each tagged with its table, including the marker row", async () => {
