@@ -54,9 +54,11 @@ async function likeCountFor(ctx: QueryCtx, message: Id<"messages">): Promise<num
 }
 
 async function toFeedRow(ctx: QueryCtx, message: Doc<"messages">) {
-	const senderDoc = await ctx.db.get("users", message.sender);
+	const [senderDoc, likeCount] = await Promise.all([
+		ctx.db.get("users", message.sender),
+		likeCountFor(ctx, message._id),
+	]);
 	const sender = senderDoc === null ? null : { _id: senderDoc._id, name: senderDoc.name };
-	const likeCount = await likeCountFor(ctx, message._id);
 	return {
 		_id: message._id,
 		_creationTime: message._creationTime,
@@ -81,12 +83,15 @@ async function boundedRoomFeed(ctx: QueryCtx, room: Id<"rooms">, limit: number) 
 		.withIndex("by_room", (q) => q.eq("room", room))
 		.collect();
 
+	const flags = await Promise.all(
+		candidates.map((message) => isActiveMember(ctx, room, message.sender)),
+	);
 	const included: Doc<"messages">[] = [];
-	for (const message of candidates) {
-		if (await isActiveMember(ctx, room, message.sender)) {
+	candidates.forEach((message, i) => {
+		if (flags[i]) {
 			included.push(message);
 		}
-	}
+	});
 	included.sort(compareDesc);
 	return Promise.all(included.slice(0, limit).map((message) => toFeedRow(ctx, message)));
 }
