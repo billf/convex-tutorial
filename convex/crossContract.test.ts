@@ -1,11 +1,14 @@
 /// <reference types="vite/client" />
 /**
- * Branch-review BR7/BR8: two design decisions the branch review surfaced
- * but did NOT resolve, because both require a product decision rather than
- * a bug fix. These tests characterize (do not fix) the current behavior so
- * a future change to either side is a deliberate, visible diff here rather
- * than a silent regression -- see this repo's `.agent-reviews/` branch
- * review file for the full write-up and suggested fixes.
+ * Branch-review BR7/BR8: two design decisions the branch review surfaced.
+ * BR8 was resolved by an explicit product decision (2026-09-26: demo/test
+ * chat traffic should populate demo/test memberships, to keep demo/test
+ * behavior as close to production as possible) and is now a regression
+ * test for that fix. BR7 remains an open decision (which deleted-sender
+ * projection to standardize on); its test only characterizes the current
+ * split so a future change to either side is a deliberate, visible diff
+ * here rather than a silent regression -- see this repo's `.agent-reviews/`
+ * branch review file for the full write-up and suggested fixes.
  */
 import { convexTest } from "convex-test";
 import { expect, test } from "vitest";
@@ -29,13 +32,10 @@ test("BR7 (not fixed): chat:getMessages and proofVehicle/feed:roomFeed disagree 
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Ghost" });
 	await t.mutation(api.chat.sendMessage, { user: userId, body: "boo" });
-
-	// roomFeed needs an active membership to include the message at all;
-	// chat:sendMessage doesn't create one (that's BR8, characterized below),
-	// so seed it directly to isolate BR7's projection question.
+	// sendMessage now ensures an active membership itself (BR8, fixed below),
+	// so roomFeed will include this message once the sender is deleted.
 	const room = await t.run(async (ctx) => {
 		const [firstRoom] = await ctx.db.query("rooms").take(1);
-		await ctx.db.insert("memberships", { room: firstRoom!._id, user: userId, active: true });
 		return firstRoom!._id;
 	});
 	await t.run((ctx) => ctx.db.delete("users", userId));
@@ -54,7 +54,7 @@ test("BR7 (not fixed): chat:getMessages and proofVehicle/feed:roomFeed disagree 
 	// would mishandle the other's output.
 });
 
-test("BR8 (not fixed): a message sent via chat:sendMessage is invisible to proofVehicle/feed:roomFeed", async () => {
+test("BR8 (fixed 2026-09-26): a message sent via chat:sendMessage is visible to proofVehicle/feed:roomFeed", async () => {
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
 	await t.mutation(api.chat.sendMessage, { user: userId, body: "hi from the live UI" });
@@ -68,9 +68,9 @@ test("BR8 (not fixed): a message sent via chat:sendMessage is invisible to proof
 	const chatMessages = await t.query(api.chat.getMessages, {});
 	expect(chatMessages).toHaveLength(1);
 
-	// ...but roomFeed excludes it: sendMessage never wrote a membership row,
-	// and roomFeed requires one to be active. Demo chat traffic and
-	// proof-vehicle oracle traffic silently partition.
+	// ...and, per an explicit product decision (keep demo/test traffic as
+	// close to production as possible), sendMessage now also ensures an
+	// active membership, so roomFeed sees it too.
 	const feed = await t.query(roomFeed, { room });
-	expect(feed).toHaveLength(0);
+	expect(feed).toHaveLength(1);
 });
