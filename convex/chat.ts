@@ -10,11 +10,16 @@ import schema from "./schema";
 const DEFAULT_ROOM_NAME = "general";
 
 async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
-	const existing = await ctx.db
+	// by_name has no uniqueness guarantee, so two racing sendMessage calls
+	// that both see no room and both insert must not make later lookups
+	// throw; take the oldest matching row (the one actually chosen by the
+	// first insert to win) instead of asserting exactly one exists.
+	const [existing] = await ctx.db
 		.query("rooms")
 		.withIndex("by_name", (q) => q.eq("name", DEFAULT_ROOM_NAME))
-		.unique();
-	if (existing !== null) {
+		.order("asc")
+		.take(1);
+	if (existing !== undefined) {
 		return existing._id;
 	}
 	return await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
@@ -44,11 +49,14 @@ export const getMessages = query({
 	handler: async (ctx) => {
 		// getMessages is a query and cannot insert, so it returns [] before
 		// the default room exists (i.e. before any message has been sent).
-		const room = await ctx.db
+		// Same by_name non-uniqueness caveat as getOrCreateDefaultRoom: take
+		// the oldest matching row instead of asserting exactly one exists.
+		const [room] = await ctx.db
 			.query("rooms")
 			.withIndex("by_name", (q) => q.eq("name", DEFAULT_ROOM_NAME))
-			.unique();
-		if (room === null) {
+			.order("asc")
+			.take(1);
+		if (room === undefined) {
 			return [];
 		}
 
