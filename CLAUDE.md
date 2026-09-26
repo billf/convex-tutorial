@@ -67,7 +67,10 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
     `by_name` index, or inserts a new one. This is how a freshly-generated
     client display name becomes a real `users` row/id on first load.
   - `sendMessage` (mutation) — lazily creates (or finds) a single default
-    room named `"general"` the first time it's called, then inserts a
+    room named `"general"` the first time it's called, ensures the sender
+    has an active membership in it (so demo/test chat traffic populates
+    demo/test memberships and stays visible to the proof-vehicle oracle
+    below, matching production-shaped traffic's behavior), then inserts a
     message tied to that room and the given user id.
   - `getMessages` (query) — reads the latest 50 messages in the default
     room and resolves each message's sender name server-side (batched by
@@ -83,11 +86,10 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
   `tables.ts` (plain per-table reads), `mutations.ts` (nine deterministic
   mutations), `fixture.ts` (marker sequence, guarded reset, shared patch
   logic), and `corpus/v1.json`/`v1.parity.json` (six hand-authored test
-  vectors plus golden hashes). It does not affect `chat.ts`'s behavior, but
-  shares its tables — notably, live chat traffic through `sendMessage`
-  currently creates no `memberships` row, so demo messages sent via the UI
-  are invisible to `proofVehicle/feed:roomFeed`'s active-membership filter.
-  `scripts/proof-vehicle-load.ts` loads a corpus vector into a real
+  vectors plus golden hashes). It shares `chat.ts`'s tables but not its
+  code path; `sendMessage`'s membership write (above) keeps demo chat
+  traffic visible to `proofVehicle/feed:roomFeed`'s active-membership
+  filter. `scripts/proof-vehicle-load.ts` loads a corpus vector into a real
   deployment (see the Commands section above); it has not been run
   end-to-end in this environment.
 - `_generated/` is Convex codegen (`api.d.ts`, `dataModel.d.ts`, server
