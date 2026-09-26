@@ -9,7 +9,7 @@
 import { mutation } from "../_generated/server";
 import { v } from "convex/values";
 import type { MutationCtx } from "../_generated/server";
-import type { Doc, Id, TableNames } from "../_generated/dataModel";
+import type { Id, TableNames } from "../_generated/dataModel";
 
 /** Bumps the single `proofVehicleMarkers` row, creating it on first use. */
 export async function bumpMarker(ctx: MutationCtx): Promise<number> {
@@ -70,9 +70,8 @@ export const reset = mutation({
 /**
  * Shared by `patchMessageBody` (this file's V4 post-bind fixture step) and
  * `proofVehicle/mutations:updateMessageBody` (the general Q13 delta
- * mutation): the two were previously byte-identical, separately-maintained
- * handlers with no code link between them, so a one-sided future edit could
- * silently diverge them. `ctx.db.patch` never touches `_creationTime`
+ * mutation); sharing one implementation means they cannot silently diverge.
+ * `ctx.db.patch` never touches `_creationTime`
  * (system-assigned at insert, `crates/database/src/transaction.rs:583`),
  * which is exactly the invariant V4's tie depends on.
  */
