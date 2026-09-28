@@ -22,13 +22,15 @@
  *
  * Usage: npx tsx scripts/proof-vehicle-load.ts <V1|V2|V3|V4|V5|V6>
  *
- * Requires both CONVEX_URL (for reads) and CONVEX_DEPLOYMENT (passed
- * explicitly to every `npx convex import`, so writes cannot silently
- * default to a different deployment than CONVEX_URL points at -- see M1 in
- * the u5 review) to point at the same target deployment, both set together
- * by `npx convex dev`'s own env file, and PROOF_VEHICLE_FIXTURE=1 set on
- * that deployment (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a
- * delta calls `fixture:reset`.
+ * Requires CONVEX_URL and PROOF_VEHICLE_ADMIN_KEY in this process's
+ * environment (`tsx` does not load `.env.local` automatically): the URL
+ * names the self-hosted deployment for reads, and the same URL plus key
+ * are passed explicitly to every `npx convex import` (no `--deployment`
+ * -- the Convex CLI does not allow it with self-hosted credentials), so
+ * writes cannot silently default to a different deployment than reads
+ * use. Also requires PROOF_VEHICLE_FIXTURE=1 set on that deployment
+ * (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a delta calls
+ * `fixture:reset`.
  *
  * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
  * import with `--replace`, which clears those tables entirely -- and
@@ -41,10 +43,11 @@
  * proofVehicle/fixture:reset '{}'` (requires `PROOF_VEHICLE_FIXTURE=1` on
  * that deployment) if you do need to reuse one.
  *
- * NOTE: this script has not been run against a live deployment in this
- * environment (none was configured here); its phased-import and
- * label-binding logic is exercised structurally by this file's own unit
- * tests below the CLI entrypoint, and its end-to-end proof -- like V4's
+ * NOTE: V1 has been run against a live self-hosted deployment in this
+ * environment (local backend on 127.0.0.1:3210, using the I2d CONVEX_URL /
+ * PROOF_VEHICLE_ADMIN_KEY path); its phased-import and label-binding
+ * logic is further exercised structurally by this file's own unit tests
+ * below the CLI entrypoint, and its end-to-end proof -- like V4's
  * literal ID tie -- is the snapshot reference run (U11).
  */
 
@@ -137,19 +140,76 @@ export function buildImportRows(
 	});
 }
 
+/**
+ * Self-hosted import target (I2d/KTD5): the deployment's URL and admin
+ * key, used for both reads (ConvexHttpClient) and every
+ * `npx convex import`. The explicit `--url`/`--admin-key` path writes
+ * CONVEX_URL but removes CONVEX_DEPLOYMENT, and the Convex CLI does not
+ * allow `--deployment` with self-hosted credentials -- so imports carry
+ * the same URL and key instead of a deployment name.
+ */
+export type ImportTarget = { url: string; adminKey: string };
+
+/**
+ * Resolves the self-hosted target from the process environment, failing
+ * before any import when either value is missing.
+ */
+export function resolveImportTarget(env: NodeJS.ProcessEnv): ImportTarget {
+	const url = env["CONVEX_URL"];
+	if (url === undefined || url === "") {
+		throw new Error(
+			"resolveImportTarget: CONVEX_URL is not set. Set it to the self-hosted deployment URL, " +
+				"matching the generated `.env.local`.",
+		);
+	}
+	const adminKey = env["PROOF_VEHICLE_ADMIN_KEY"];
+	if (adminKey === undefined || adminKey === "") {
+		throw new Error(
+			"resolveImportTarget: PROOF_VEHICLE_ADMIN_KEY is not set. Supply it from " +
+				"`just generate-admin-key` in the backend checkout.",
+		);
+	}
+	return { url, adminKey };
+}
+
+/**
+ * Builds one `npx convex import` argv (without the leading `npx`) for a
+ * phase file. Extracted so the self-hosted flag shape is unit-testable
+ * without a live deployment -- the subprocess call itself cannot be.
+ */
+export function importArgs(
+	table: string,
+	file: string,
+	replace: boolean,
+	target: ImportTarget,
+): string[] {
+	const args = [
+		"convex",
+		"import",
+		"--url",
+		target.url,
+		"--admin-key",
+		target.adminKey,
+		"--table",
+		table,
+		"--yes",
+	];
+	if (replace) args.push("--replace");
+	args.push(file);
+	return args;
+}
+
 function runConvexImport(
 	table: string,
 	rows: Record<string, unknown>[],
 	replace: boolean,
-	deployment: string,
+	target: ImportTarget,
 ): void {
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
 	const file = join(dir, `${table}.jsonl`);
 	writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
 	try {
-		const args = ["convex", "import", "--deployment", deployment, "--table", table, "--yes"];
-		if (replace) args.push("--replace");
-		args.push(file);
+		const args = importArgs(table, file, replace, target);
 		// A stalled subprocess (network partition, stalled npx resolution,
 		// an interactive prompt this non-interactive caller can't answer)
 		// must not block the loader indefinitely: time out after 120s.
@@ -249,33 +309,19 @@ async function main(): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	const url = process.env["CONVEX_URL"];
-	if (url === undefined) {
-		console.error("proof-vehicle-load.ts: CONVEX_URL is not set");
+	// Reads (ConvexHttpClient, below) and writes (`npx convex import`,
+	// further below) target one self-hosted deployment via the same URL
+	// and admin key (I2d/KTD5). `tsx` does not load `.env.local`
+	// automatically, so both arrive in this process's environment.
+	let target: ImportTarget;
+	try {
+		target = resolveImportTarget(process.env);
+	} catch (error) {
+		console.error(`proof-vehicle-load.ts: ${error instanceof Error ? error.message : error}`);
 		process.exitCode = 1;
 		return;
 	}
-	// The read client (ConvexHttpClient, above) and the write path
-	// (`npx convex import`, below) must name the same deployment
-	// explicitly: without an explicit flag the import would silently use
-	// the CLI's own default resolution (the project's dev deployment),
-	// which is only guaranteed to match CONVEX_URL by operator
-	// discipline, not by anything this script checks. CONVEX_DEPLOYMENT is
-	// the identifier `npx convex import` itself accepts via --deployment;
-	// requiring it removes the implicit default, but does not prove it
-	// names the same deployment CONVEX_URL points at -- see this commit's
-	// message for why that stronger check isn't implemented here.
-	const deployment = process.env["CONVEX_DEPLOYMENT"];
-	if (deployment === undefined) {
-		console.error(
-			"proof-vehicle-load.ts: CONVEX_DEPLOYMENT is not set. Every `npx convex import` call " +
-				"needs an explicit --deployment target so it cannot silently default to a different " +
-				"deployment than CONVEX_URL (the read client) points at. Set it to the same deployment " +
-				"as CONVEX_URL, e.g. via `npx convex dev`'s own env file.",
-		);
-		process.exitCode = 1;
-		return;
-	}
+	const url = target.url;
 	const client = new ConvexHttpClient(url);
 
 	const existingMessages = await client.query(
@@ -354,7 +400,7 @@ async function main(): Promise<void> {
 	for (const phase of phases) {
 		const rows = buildImportRows(phase, idByLabel);
 		const replace = phase.table === "rooms" || phase.table === "users";
-		runConvexImport(phase.table, rows, replace, deployment);
+		runConvexImport(phase.table, rows, replace, target);
 		for (const [label, id] of await readBackLabels(client, phase, idByLabel)) {
 			idByLabel.set(label, id);
 		}
