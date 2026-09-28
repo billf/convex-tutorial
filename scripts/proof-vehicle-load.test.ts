@@ -2,9 +2,11 @@ import { expect, test } from "vitest";
 import {
 	buildImportRows,
 	computeNonEmptyTables,
+	importArgs,
 	legacyMessagesPresent,
 	naturalKey,
 	planImportPhases,
+	resolveImportTarget,
 } from "./proof-vehicle-load";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp } from "../convex/proofVehicle/fixture";
@@ -122,4 +124,58 @@ test("buildImportRows offsets messages' _creationTime from a fixed epoch base", 
 	const [row] = buildImportRows(phase, idByLabel);
 	expect(typeof row!["_creationTime"]).toBe("number");
 	expect(row!["body"]).toBe("one");
+});
+
+// I2d/KTD5: the self-hosted path resolves one URL + admin key target
+// from the process environment and fails before any import when either
+// value is missing.
+test("resolveImportTarget returns the URL and admin key when both are set", () => {
+	expect(
+		resolveImportTarget({ CONVEX_URL: "http://127.0.0.1:3210", PROOF_VEHICLE_ADMIN_KEY: "k" }),
+	).toEqual({ url: "http://127.0.0.1:3210", adminKey: "k" });
+});
+
+test("resolveImportTarget rejects a missing URL before any import", () => {
+	expect(() => resolveImportTarget({ PROOF_VEHICLE_ADMIN_KEY: "k" })).toThrow(/CONVEX_URL/);
+	expect(() => resolveImportTarget({ CONVEX_URL: "", PROOF_VEHICLE_ADMIN_KEY: "k" })).toThrow(
+		/CONVEX_URL/,
+	);
+});
+
+test("resolveImportTarget rejects a missing admin key before any import", () => {
+	expect(() => resolveImportTarget({ CONVEX_URL: "http://127.0.0.1:3210" })).toThrow(
+		/PROOF_VEHICLE_ADMIN_KEY/,
+	);
+});
+
+// I2d/KTD5: every import carries --url/--admin-key and never
+// --deployment on the self-hosted path.
+test("importArgs passes the target URL and key to each import, without --deployment", () => {
+	const args = importArgs("rooms", "/tmp/rooms.jsonl", true, {
+		url: "http://127.0.0.1:3210",
+		adminKey: "k",
+	});
+	expect(args).toEqual([
+		"convex",
+		"import",
+		"--url",
+		"http://127.0.0.1:3210",
+		"--admin-key",
+		"k",
+		"--table",
+		"rooms",
+		"--yes",
+		"--replace",
+		"/tmp/rooms.jsonl",
+	]);
+	expect(args).not.toContain("--deployment");
+});
+
+test("importArgs omits --replace for non-replace phases", () => {
+	const args = importArgs("likes", "/tmp/likes.jsonl", false, {
+		url: "http://127.0.0.1:3210",
+		adminKey: "k",
+	});
+	expect(args).not.toContain("--replace");
+	expect(args).not.toContain("--deployment");
 });
