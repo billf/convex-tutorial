@@ -9,6 +9,10 @@
  */
 
 import type * as chat from "../chat.js";
+import type * as proofVehicle_feed from "../proofVehicle/feed.js";
+import type * as proofVehicle_fixture from "../proofVehicle/fixture.js";
+import type * as proofVehicle_mutations from "../proofVehicle/mutations.js";
+import type * as proofVehicle_tables from "../proofVehicle/tables.js";
 
 import type {
   ApiFromModules,
@@ -18,6 +22,10 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   chat: typeof chat;
+  "proofVehicle/feed": typeof proofVehicle_feed;
+  "proofVehicle/fixture": typeof proofVehicle_fixture;
+  "proofVehicle/mutations": typeof proofVehicle_mutations;
+  "proofVehicle/tables": typeof proofVehicle_tables;
 }>;
 
 /**
