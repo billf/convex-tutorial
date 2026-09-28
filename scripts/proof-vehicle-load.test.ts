@@ -146,6 +146,9 @@ test("resolveImportTarget rejects a missing admin key before any import", () => 
 	expect(() => resolveImportTarget({ CONVEX_URL: "http://127.0.0.1:3210" })).toThrow(
 		/PROOF_VEHICLE_ADMIN_KEY/,
 	);
+	expect(() =>
+		resolveImportTarget({ CONVEX_URL: "http://127.0.0.1:3210", PROOF_VEHICLE_ADMIN_KEY: "" }),
+	).toThrow(/PROOF_VEHICLE_ADMIN_KEY/);
 });
 
 // I2d/KTD5: every import carries --url/--admin-key and never
