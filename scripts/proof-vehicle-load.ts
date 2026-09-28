@@ -37,11 +37,18 @@
  * convex/chat.ts (the live tutorial chat app) reads/writes those same
  * tables. This loader refuses to run against any deployment where
  * rooms/users/memberships/messages/likes already has rows (a `npm run dev`
- * deployment always does, from its first chat message onward) unless
- * `PROOF_VEHICLE_ALLOW_NONEMPTY=1` is set -- use a fresh/disposable
- * deployment instead of setting it. Reset first with `npx convex run
- * proofVehicle/fixture:reset '{}'` (requires `PROOF_VEHICLE_FIXTURE=1` on
- * that deployment) if you do need to reuse one.
+ * deployment always does, from its first chat message onward). Reset first
+ * with `npx convex run proofVehicle/fixture:reset '{}'` (requires
+ * `PROOF_VEHICLE_FIXTURE=1` on that deployment) or point at a fresh
+ * deployment -- do not just set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to skip
+ * the check; on a nonempty target that still replaces rooms/users and can
+ * still leave a partial import (see the error text this throws for why).
+ *
+ * The emptiness check is point-in-time (once before the run, and again
+ * immediately before each --replace phase) with no lock held across the
+ * import -- run this only against a deployment with no other writer
+ * (nothing else calling chat:sendMessage/getOrCreateUser or the
+ * proofVehicle mutations) for its duration.
  *
  * NOTE: V1 has been run against a live self-hosted deployment in this
  * environment (local backend on 127.0.0.1:3210, using the I2d CONVEX_URL /
@@ -386,9 +393,13 @@ async function main(): Promise<void> {
 				`non-empty-target: this deployment already has rows in [${nonEmptyTables.join(", ")}]. ` +
 					"Running this loader here would either replace live rooms/users data (if this is the " +
 					"deployment `npm run dev` uses) or leave a partial import (--replace on rooms/users " +
-					"only, requireEmpty on the rest). Use a fresh/disposable deployment, run " +
-					"`proofVehicle/fixture:reset` first, or set PROOF_VEHICLE_ALLOW_NONEMPTY=1 to bypass " +
-					"this check.",
+					"only, requireEmpty on the rest). Use a fresh/disposable deployment, or run " +
+					"`proofVehicle/fixture:reset` first and re-run. PROOF_VEHICLE_ALLOW_NONEMPTY=1 skips " +
+					"this check entirely -- it is NOT a safe alternative to reset: on a nonempty target it " +
+					"still replaces rooms/users and can still hit requireEmpty rejections on " +
+					"memberships/messages/likes, leaving fresh rooms/users IDs with stale rows pointing at " +
+					"the old (now-deleted) ones. Only set it on a deployment you have separately verified " +
+					"is safe to lose all proof-vehicle-table data on, and prefer reset first regardless.",
 			);
 		}
 	}
@@ -398,8 +409,32 @@ async function main(): Promise<void> {
 	const idByLabel = new Map<string, string>();
 
 	for (const phase of phases) {
-		const rows = buildImportRows(phase, idByLabel);
 		const replace = phase.table === "rooms" || phase.table === "users";
+		// The preflight guard above is point-in-time and holds no lock across
+		// this loop; live traffic (a chat message, sendMessage's BR8
+		// membership write) landing after it passes and before a --replace
+		// phase runs would be silently destroyed by that --replace. This
+		// can't close the race -- Convex has no cross-request lock this
+		// script can take -- but re-checking immediately before each
+		// --replace phase (rather than only once, before all five) shrinks
+		// the window from "the whole script's runtime" to "between this
+		// check and the next subprocess call".
+		if (replace && process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
+			const rows = await client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					`proofVehicle/tables:${phase.table}`,
+				),
+				{},
+			);
+			if (rows.length > 0) {
+				throw new Error(
+					`non-empty-target: ${phase.table} gained rows after the initial preflight check ` +
+						"(likely live traffic during this run). Refusing to --replace it. Re-run after " +
+						"confirming the deployment is quiesced.",
+				);
+			}
+		}
+		const rows = buildImportRows(phase, idByLabel);
 		runConvexImport(phase.table, rows, replace, target);
 		for (const [label, id] of await readBackLabels(client, phase, idByLabel)) {
 			idByLabel.set(label, id);
