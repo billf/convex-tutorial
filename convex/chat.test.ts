@@ -30,6 +30,17 @@ test("getOrCreateUser is idempotent and distinguishes different names", async ()
 	expect(users.filter((user) => user.name === "Alice")).toHaveLength(1);
 });
 
+// Same race class the M1/M10 fixups removed from the rooms/membership/feed
+// lookups: two racing getOrCreateUser calls can both see no row and both
+// insert, and the lookup must resolve instead of throwing on the duplicate.
+test("getOrCreateUser tolerates duplicate names instead of throwing", async () => {
+	const t = convexTest(schema, modules);
+	const first = await t.run((ctx) => ctx.db.insert("users", { name: "Dup" }));
+	await t.run((ctx) => ctx.db.insert("users", { name: "Dup" }));
+	const resolved = await t.mutation(api.chat.getOrCreateUser, { name: "Dup" });
+	expect(resolved).toBe(first);
+});
+
 test("sendMessage inserts a message tied to the given user", async () => {
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });

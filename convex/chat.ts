@@ -119,11 +119,15 @@ export const getOrCreateUser = mutation({
 	args: { name: v.string() },
 	returns: v.id("users"),
 	handler: async (ctx, args) => {
-		const existing = await ctx.db
+		// Same by_name non-uniqueness caveat as findDefaultRoom: two racing
+		// calls can both see no row and both insert, so resolve the oldest
+		// match instead of asserting exactly one exists.
+		const [existing] = await ctx.db
 			.query("users")
 			.withIndex("by_name", (q) => q.eq("name", args.name))
-			.unique();
-		if (existing !== null) {
+			.order("asc")
+			.take(1);
+		if (existing !== undefined) {
 			return existing._id;
 		}
 		return await ctx.db.insert("users", { name: args.name });
