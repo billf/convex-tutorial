@@ -6,7 +6,7 @@
  * 2026-09-11-1159-feat-skip-shared-prerequisites-plan.md, U5.
  */
 
-import { mutation } from "../_generated/server";
+import { internalMutation, mutation } from "../_generated/server";
 import { v } from "convex/values";
 import type { MutationCtx } from "../_generated/server";
 import type { Id, TableNames } from "../_generated/dataModel";
@@ -48,8 +48,16 @@ const PROOF_VEHICLE_TABLES = [
  * Destructive: deletes every row in all six proof-vehicle tables (the five
  * contract tables plus the harness-only marker table). Refuses to run
  * unless the deployment env var `PROOF_VEHICLE_FIXTURE` is exactly `"1"`.
+ *
+ * Review finding #3 (2026-09-28): internal, not public -- the
+ * `PROOF_VEHICLE_FIXTURE` guard alone let any connected client wipe every
+ * proof-vehicle table on a deployment with the flag set. `npx convex run`
+ * (the loader's documented reset command) and convex-test's `t.mutation`
+ * can both still call an internal function directly via the admin
+ * key/testing backdoor, so this does not change how the CLI or tests reach
+ * it.
  */
-export const reset = mutation({
+export const reset = internalMutation({
 	args: {},
 	returns: v.null(),
 	handler: async (ctx) => {
