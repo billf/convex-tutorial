@@ -28,9 +28,13 @@
  * are passed explicitly to every `npx convex import` (no `--deployment`
  * -- the Convex CLI does not allow it with self-hosted credentials), so
  * writes cannot silently default to a different deployment than reads
- * use. Also requires PROOF_VEHICLE_FIXTURE=1 set on that deployment
- * (`npx convex env set PROOF_VEHICLE_FIXTURE 1`) if a delta calls
- * `fixture:reset`.
+ * use. Also requires PROOF_VEHICLE_FIXTURE=1 set on that deployment if a
+ * delta calls `fixture:reset` -- set it with the same --url/--admin-key
+ * binding as every import here, e.g.
+ * `npx convex env set PROOF_VEHICLE_FIXTURE 1 --url "$CONVEX_URL"
+ * --admin-key "$PROOF_VEHICLE_ADMIN_KEY"`. A bare `npx convex env set`
+ * (no --url/--admin-key) targets the CLI's own default dev deployment
+ * instead, which can silently differ from CONVEX_URL.
  *
  * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
  * import with `--replace`, which clears those tables entirely -- and
@@ -38,8 +42,11 @@
  * tables. This loader refuses to run against any deployment where
  * rooms/users/memberships/messages/likes already has rows (a `npm run dev`
  * deployment always does, from its first chat message onward). Reset first
- * with `npx convex run proofVehicle/fixture:reset '{}'` (requires
- * `PROOF_VEHICLE_FIXTURE=1` on that deployment) or point at a fresh
+ * with `npx convex run proofVehicle/fixture:reset '{}' --url "$CONVEX_URL"
+ * --admin-key "$PROOF_VEHICLE_ADMIN_KEY"` (requires `PROOF_VEHICLE_FIXTURE=1`
+ * on that deployment; the same --url/--admin-key binding matters here too
+ * -- a bare `npx convex run` targets the CLI's default dev deployment, not
+ * necessarily the one this loader just checked) or point at a fresh
  * deployment -- do not just set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to skip
  * the check; on a nonempty target that still replaces rooms/users and can
  * still leave a partial import (see the error text this throws for why).
