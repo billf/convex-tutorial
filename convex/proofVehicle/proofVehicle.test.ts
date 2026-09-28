@@ -61,22 +61,36 @@ const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
 	membershipAndLikesTxn: mutationRef("proofVehicle/mutations:membershipAndLikesTxn"),
 };
 
-// The affectedIds key a delta's `label` should bind to, per mutation. Needed
-// because Convex's returns validator does not promise to preserve the
-// handler's object-literal key order (membershipAndLikesTxn's {membership,
-// like} does not survive round-trip in insertion order), so a delta's label
-// cannot be bound positionally -- it must name the key explicitly.
-const LABEL_BIND_KEY: Record<string, string> = {
-	sendMessage: "message",
-	updateMessageBody: "message",
-	deleteMessage: "message",
-	renameUser: "user",
-	deleteUser: "user",
-	setMembershipActive: "membership",
-	addLike: "like",
-	removeLike: "like",
-	membershipAndLikesTxn: "like",
+// One descriptor per mutation for the delta-test harness, covering both
+// formulation sites that must agree per mutation:
+// - `bindKey`: the affectedIds key a delta's `label` should bind to.
+//   Needed because Convex's returns validator does not promise to preserve
+//   the handler's object-literal key order (membershipAndLikesTxn's
+//   {membership, like} does not survive round-trip in insertion order), so
+//   a delta's label cannot be bound positionally -- it must name the key
+//   explicitly.
+// - `idArgKeys`: the arg keys each mutation expects an id (not a literal)
+//   for. resolveArgs only rewrites these -- previously it rewrote ANY
+//   string arg that happened to match a label, so a delta passing a
+//   literal body/name string equal to some other row's label (corpus V2
+//   already has both a user labeled "a" and a message body "a") would have
+//   silently sent an id where a string was expected.
+// A parity test below pins this map's key set to the registered MUTATIONS.
+const MUTATION_TEST_META: Record<string, { bindKey: string; idArgKeys: readonly string[] }> = {
+	sendMessage: { bindKey: "message", idArgKeys: ["room", "sender"] },
+	updateMessageBody: { bindKey: "message", idArgKeys: ["message"] },
+	deleteMessage: { bindKey: "message", idArgKeys: ["message"] },
+	renameUser: { bindKey: "user", idArgKeys: ["user"] },
+	deleteUser: { bindKey: "user", idArgKeys: ["user"] },
+	setMembershipActive: { bindKey: "membership", idArgKeys: ["membership"] },
+	addLike: { bindKey: "like", idArgKeys: ["message", "user"] },
+	removeLike: { bindKey: "like", idArgKeys: ["like"] },
+	membershipAndLikesTxn: { bindKey: "like", idArgKeys: ["membership", "message", "user"] },
 };
+
+test("MUTATION_TEST_META covers exactly the registered MUTATIONS", () => {
+	expect(new Set(Object.keys(MUTATION_TEST_META))).toEqual(new Set(Object.keys(MUTATIONS)));
+});
 
 const fixtureMarker = makeFunctionReference<"mutation", Record<string, never>, { marker: number }>(
 	"proofVehicle/fixture:marker",
@@ -117,31 +131,13 @@ function withoutCreationTime<T extends { _creationTime: number }>(row: T) {
 	return rest;
 }
 
-// The arg keys each mutation expects an id (not a literal) for. resolveArgs
-// only rewrites these -- previously it rewrote ANY string arg that happened
-// to match a label, so a delta passing a literal body/name string equal to
-// some other row's label (corpus V2 already has both a user labeled "a" and
-// a message body "a") would have silently sent an id where a string was
-// expected.
-const ID_ARG_KEYS: Record<string, readonly string[]> = {
-	sendMessage: ["room", "sender"],
-	updateMessageBody: ["message"],
-	deleteMessage: ["message"],
-	renameUser: ["user"],
-	deleteUser: ["user"],
-	setMembershipActive: ["membership"],
-	addLike: ["message", "user"],
-	removeLike: ["like"],
-	membershipAndLikesTxn: ["membership", "message", "user"],
-};
-
 /** Resolves a delta's id-typed `args` (symbolic labels) to real ids via `idByLabel`; literal args pass through unchanged. */
 function resolveArgs(
 	mutationName: string,
 	args: Record<string, unknown>,
 	idByLabel: ReadonlyMap<string, Id<TableNames>>,
 ): Record<string, unknown> {
-	const idKeys = new Set(ID_ARG_KEYS[mutationName] ?? []);
+	const idKeys = new Set(MUTATION_TEST_META[mutationName]?.idArgKeys ?? []);
 	const out: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(args)) {
 		if (idKeys.has(key) && typeof value === "string" && idByLabel.has(value)) {
@@ -363,11 +359,11 @@ async function applyDelta(
 	if (ref === undefined) throw new Error(`applyDelta: unknown mutation "${delta.mutation}"`);
 	const ack = await t.mutation(ref, resolveArgs(delta.mutation, delta.args, idByLabel));
 	if (delta.label !== undefined) {
-		const bindKey = LABEL_BIND_KEY[delta.mutation];
+		const bindKey = MUTATION_TEST_META[delta.mutation]?.bindKey;
 		const bound = bindKey !== undefined ? ack.affectedIds[bindKey] : undefined;
 		if (bound === undefined) {
 			throw new Error(
-				`applyDelta: no LABEL_BIND_KEY entry (or no matching affectedIds key) for mutation "${delta.mutation}"`,
+				`applyDelta: no MUTATION_TEST_META entry (or no matching affectedIds key) for mutation "${delta.mutation}"`,
 			);
 		}
 		idByLabel.set(delta.label, bound as Id<TableNames>);
@@ -604,17 +600,24 @@ test("computeParity reproduces the vendored corpus/v1.parity.json for every vect
 // computeParity (creationTime is dropped from the hash) would ever catch a
 // disagreement here -- this is a plain data-consistency check on the corpus
 // JSON itself, independent of any Convex query.
-test("corpus: base and expectedBase declared creationTime agree for every message, in every vector", () => {
+test("corpus: base and expectedBase agree for every message, in every vector", () => {
 	for (const [key, vector] of Object.entries(corpus.vectors)) {
-		const baseCreationTimeByLabel = new Map(
+		const baseMessageByLabel = new Map(
 			(vector.base as BaseOp[])
 				.filter((op): op is BaseOp & { op: "insertMessage" } => op.op === "insertMessage")
-				.map((op) => [op.label, op.creationTime]),
+				.map((op) => [op.label, op]),
 		);
-		for (const row of (vector.expectedBase ?? []) as { id: string; creationTime: number }[]) {
-			const declared = baseCreationTimeByLabel.get(row.id);
-			if (declared === undefined) continue;
-			expect(declared, `${key}: expectedBase "${row.id}" creationTime`).toBe(row.creationTime);
+		for (const row of (vector.expectedBase ?? []) as CorpusOutRow[]) {
+			const baseOp = baseMessageByLabel.get(row.id);
+			if (baseOp === undefined) {
+				throw new Error(
+					`${key}: expectedBase "${row.id}" has no matching base insertMessage op`,
+				);
+			}
+			expect(baseOp.creationTime, `${key}: expectedBase "${row.id}" creationTime`).toBe(
+				row.creationTime,
+			);
+			expect(baseOp.body, `${key}: expectedBase "${row.id}" body`).toBe(row.body);
 		}
 	}
 });
