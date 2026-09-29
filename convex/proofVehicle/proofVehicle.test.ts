@@ -511,6 +511,32 @@ test("membershipAndLikesBatchTxn rejects an empty likes list without writing", a
 	expect(stored?.active).toBe(true);
 });
 
+test("membershipAndLikesBatchTxn rejects 101 likes without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const message = await t.run((ctx) =>
+		ctx.db.insert("messages", { room, sender: user, body: "hello" }),
+	);
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(membershipAndLikesBatchTxn, {
+			membership,
+			active: false,
+			likes: Array.from({ length: 101 }, () => ({ message, user })),
+		}),
+	).rejects.toThrow(/1 to 100/);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").take(1),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(true);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
 test("each mutation's acks name the rows it wrote", async () => {
 	const t = convexTest(schema, modules);
 	const idByLabel = await runLoadBase(t, corpus.vectors.V3.base as BaseOp[]);
