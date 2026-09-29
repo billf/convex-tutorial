@@ -153,8 +153,8 @@ async function seedRoomWithMember(t: ReturnType<typeof convexTest>) {
 	return t.run(async (ctx) => {
 		const room = await ctx.db.insert("rooms", { name: "r1" });
 		const user = await ctx.db.insert("users", { name: "Alice" });
-		await ctx.db.insert("memberships", { room, user, active: true });
-		return { room, user };
+		const membership = await ctx.db.insert("memberships", { room, user, active: true });
+		return { room, user, membership };
 	});
 }
 
@@ -455,6 +455,60 @@ test("V6's transaction leaves two like rows on a1, so its count before the membe
 	// M5 regression: label "l2" must bind to the new like row, not the
 	// patched membership row.
 	expect(idByLabel.get("l2")).toBe(ack.affectedIds["like"]);
+});
+
+const membershipAndLikesBatchTxn = makeFunctionReference<
+	"mutation",
+	{
+		membership: Id<"memberships">;
+		active: boolean;
+		likes: { message: Id<"messages">; user: Id<"users"> }[];
+	},
+	{ affectedIds: { membership: Id<"memberships">; likes: Id<"likes">[] }; marker: number }
+>("proofVehicle/mutations:membershipAndLikesBatchTxn");
+
+test("membershipAndLikesBatchTxn patches the membership and inserts every like, acking them in order", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, m2, liker } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		m2: await ctx.db.insert("messages", { room, sender: user, body: "two" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+	}));
+
+	const ack = await t.mutation(membershipAndLikesBatchTxn, {
+		membership,
+		active: false,
+		likes: [
+			{ message: m1, user: liker },
+			{ message: m2, user: liker },
+			{ message: m1, user },
+		],
+	});
+	expect(ack.affectedIds.membership).toBe(membership);
+	expect(ack.affectedIds.likes).toHaveLength(3);
+	expect(ack.marker).toBeGreaterThan(0);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await Promise.all(ack.affectedIds.likes.map((id) => ctx.db.get("likes", id))),
+	}));
+	expect(stored.membership?.active).toBe(false);
+	expect(stored.likes.map((like) => [like?.message, like?.user])).toEqual([
+		[m1, liker],
+		[m2, liker],
+		[m1, user],
+	]);
+});
+
+test("membershipAndLikesBatchTxn rejects an empty likes list without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	await expect(
+		t.mutation(membershipAndLikesBatchTxn, { membership, active: false, likes: [] }),
+	).rejects.toThrow(/1 to 100/);
+	const stored = await t.run((ctx) => ctx.db.get("memberships", membership));
+	expect(stored?.active).toBe(true);
 });
 
 test("each mutation's acks name the rows it wrote", async () => {

@@ -138,3 +138,37 @@ export const membershipAndLikesTxn = mutation({
 		};
 	},
 });
+
+/**
+ * 1c U5's multi-table scenario: one membership change plus several likes
+ * in a single atomic mutation, so a Data Sync source sees one timestamp
+ * group spanning both tables (docs/plans/
+ * 2026-09-10-1854-feat-skip-data-sync-push-source-spike-plan.md, U5).
+ * `affectedIds.likes` is in the same order as `args.likes`. Like
+ * `addLike`, it never deduplicates `(message, user)`.
+ */
+export const membershipAndLikesBatchTxn = mutation({
+	args: {
+		membership: v.id("memberships"),
+		active: v.boolean(),
+		likes: v.array(v.object({ message: v.id("messages"), user: v.id("users") })),
+	},
+	returns: v.object({
+		affectedIds: v.object({ membership: v.id("memberships"), likes: v.array(v.id("likes")) }),
+		marker: v.number(),
+	}),
+	handler: async (ctx, args) => {
+		if (args.likes.length === 0 || args.likes.length > 100) {
+			throw new Error("membershipAndLikesBatchTxn: likes must have 1 to 100 entries");
+		}
+		await ctx.db.patch("memberships", args.membership, { active: args.active });
+		const likes = [];
+		for (const like of args.likes) {
+			likes.push(await ctx.db.insert("likes", { message: like.message, user: like.user }));
+		}
+		return {
+			affectedIds: { membership: args.membership, likes },
+			marker: await bumpMarker(ctx),
+		};
+	},
+});

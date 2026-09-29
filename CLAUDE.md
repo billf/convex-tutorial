@@ -83,7 +83,7 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
 - `convex/proofVehicle/` is a separate, isolated namespace implementing a
   correctness-oracle test harness on top of the same schema: `feed.ts` (the
   canonical room-feed query other implementations are checked against),
-  `tables.ts` (plain per-table reads), `mutations.ts` (nine deterministic
+  `tables.ts` (plain per-table reads), `mutations.ts` (ten deterministic
   mutations), `fixture.ts` (marker sequence, guarded reset, shared patch
   logic), and `corpus/v1.json`/`v1.parity.json` (six hand-authored test
   vectors plus golden hashes). It shares `chat.ts`'s tables but not its
