@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { convexTest } from "convex-test";
 import { expect, test } from "vitest";
 import { api } from "./_generated/api";
@@ -53,7 +54,7 @@ test('getMessages falls back to "Unknown" when a message\'s user no longer resol
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Ghost" });
 	await t.mutation(api.chat.sendMessage, { user: userId, body: "boo" });
-	await t.run((ctx) => ctx.db.delete(userId));
+	await t.run((ctx) => ctx.db.delete("users", userId));
 
 	const messages = await t.query(api.chat.getMessages, {});
 	expect(messages).toHaveLength(1);

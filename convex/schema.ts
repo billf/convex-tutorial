@@ -1,7 +1,8 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
-// Define a messages table with two indexes.
+// messages: one index for looking up by sender.
+// users: one index for looking up by name.
 export default defineSchema({
 	messages: defineTable({
 		user: v.id("users"),

@@ -9,7 +9,6 @@ export const sendMessage = mutation({
 	},
 	returns: v.null(),
 	handler: async (ctx, args) => {
-		console.log("This TypeScript function is running on the server.");
 		await ctx.db.insert("messages", {
 			user: args.user,
 			body: args.body,
@@ -26,7 +25,7 @@ export const getMessages = query({
 		const messages = await ctx.db.query("messages").order("desc").take(50);
 
 		const uniqueUserIds = [...new Set(messages.map((message) => message.user))];
-		const users = await Promise.all(uniqueUserIds.map((userId) => ctx.db.get(userId)));
+		const users = await Promise.all(uniqueUserIds.map((userId) => ctx.db.get("users", userId)));
 		const nameByUserId = new Map(
 			users.map((user, i) => [uniqueUserIds[i], user?.name ?? "Unknown"]),
 		);
