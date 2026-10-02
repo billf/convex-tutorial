@@ -20,6 +20,16 @@ test("getOrCreateUser is idempotent and distinguishes different names", async ()
 	expect(users.filter((user) => user.name === "Alice")).toHaveLength(1);
 });
 
+// Two racing getOrCreateUser calls can both see no row and both insert;
+// the lookup must resolve instead of throwing on the duplicate.
+test("getOrCreateUser tolerates duplicate names instead of throwing", async () => {
+	const t = convexTest(schema, modules);
+	const first = await t.run((ctx) => ctx.db.insert("users", { name: "Dup" }));
+	await t.run((ctx) => ctx.db.insert("users", { name: "Dup" }));
+	const resolved = await t.mutation(api.chat.getOrCreateUser, { name: "Dup" });
+	expect(resolved).toBe(first);
+});
+
 test("sendMessage inserts a message tied to the given user", async () => {
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
