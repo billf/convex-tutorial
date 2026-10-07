@@ -70,8 +70,8 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
   messages and for highlighting "your own" messages (`message.user ===
   userId`, an id comparison — not a name/string comparison).
 - `main.tsx` wraps `<App />` in `ConvexProvider` and a top-level
-  `ErrorBoundary` (`ErrorBoundary.tsx`), so a query/mutation failure during
-  render shows a fallback instead of a blank screen.
+  `ErrorBoundary` (`react-error-boundary`), so a query/mutation failure
+  during render shows a fallback instead of a blank screen.
 - Frontend tests (`App.test.tsx`, `ErrorBoundary.test.tsx`) mock
   `convex/react`'s `useQuery`/`useMutation` and the generated `api` object
   directly (string-keyed stubs) rather than hitting a real backend, using
