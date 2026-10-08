@@ -313,3 +313,23 @@ test("the all-selected-rows baseline contains every selected row and grows with 
 		{ n: 160, baseline: 327, oracle: 50 },
 	]);
 });
+
+test("replaying a batch leaves the feed unchanged", async () => {
+	const t = convexTest(schema, modules);
+	const { room, ada, bo, boMembership } = await seedRoom(t);
+	const a1 = await send(t, room, ada, "a1");
+
+	const args = {
+		membership: boMembership,
+		active: true,
+		likes: [{ message: a1, user: bo }],
+	};
+	await t.mutation(membershipAndLikesBatchTxn, args);
+	const before = await feedSummary(t, room);
+	const replay = await t.mutation(membershipAndLikesBatchTxn, args);
+
+	expect(await feedSummary(t, room)).toEqual(before);
+	expect(before).toEqual([["a1", "Ada", 1]]);
+	// The replay names the same like row instead of adding one.
+	expect(replay.affectedIds.likes).toHaveLength(1);
+});
