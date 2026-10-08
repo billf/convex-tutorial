@@ -537,6 +537,206 @@ test("membershipAndLikesBatchTxn rejects 101 likes without writing", async () =>
 	expect(stored.marker?.sequence).toBe(marker);
 });
 
+test("membershipAndLikesBatchTxn is idempotent: replaying a batch names the same like rows", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, liker } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+	}));
+	const args = { membership, active: false, likes: [{ message: m1, user: liker }] };
+
+	const first = await t.mutation(membershipAndLikesBatchTxn, args);
+	const second = await t.mutation(membershipAndLikesBatchTxn, args);
+	expect(second.affectedIds.likes).toEqual(first.affectedIds.likes);
+
+	const likes = await t.run((ctx) => ctx.db.query("likes").collect());
+	expect(likes).toHaveLength(1);
+	// A replayed batch still runs the mutation, so the marker advances.
+	expect(second.marker).toBe(first.marker + 1);
+});
+
+test("membershipAndLikesBatchTxn collapses duplicate pairs within one batch", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, liker } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+	}));
+
+	const ack = await t.mutation(membershipAndLikesBatchTxn, {
+		membership,
+		active: false,
+		likes: [
+			{ message: m1, user: liker },
+			{ message: m1, user: liker },
+		],
+	});
+	expect(ack.affectedIds.likes).toHaveLength(2);
+	expect(ack.affectedIds.likes[0]).toBe(ack.affectedIds.likes[1]);
+
+	const likes = await t.run((ctx) => ctx.db.query("likes").collect());
+	expect(likes).toHaveLength(1);
+});
+
+test("membershipAndLikesBatchTxn skips likes whose message or user no longer exists", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, liker, deadMessage, deadUser } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+		deadMessage: await ctx.db.insert("messages", { room, sender: user, body: "gone" }),
+		deadUser: await ctx.db.insert("users", { name: "Ghost" }),
+	}));
+	await t.run(async (ctx) => {
+		await ctx.db.delete("messages", deadMessage);
+		await ctx.db.delete("users", deadUser);
+	});
+
+	const ack = await t.mutation(membershipAndLikesBatchTxn, {
+		membership,
+		active: false,
+		likes: [
+			{ message: m1, user: liker },
+			{ message: deadMessage, user: liker },
+			{ message: m1, user: deadUser },
+		],
+	});
+	// Only the live pair is acked, in request order; nothing is resurrected.
+	expect(ack.affectedIds.likes).toHaveLength(1);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		users: await ctx.db.query("users").collect(),
+		messages: await ctx.db.query("messages").collect(),
+	}));
+	expect(stored.membership?.active).toBe(false);
+	expect(stored.likes.map((like) => [like?.message, like?.user])).toEqual([[m1, liker]]);
+	expect(stored.users.some((u) => u.name === "Ghost")).toBe(false);
+	expect(stored.messages.some((m) => m.body === "gone")).toBe(false);
+});
+
+test("membershipAndLikesBatchTxn with only dangling entries still patches the membership", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const deadMessage = await t.run(async (ctx) => {
+		const m = await ctx.db.insert("messages", { room, sender: user, body: "gone" });
+		return m;
+	});
+	await t.run((ctx) => ctx.db.delete("messages", deadMessage));
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	const ack = await t.mutation(membershipAndLikesBatchTxn, {
+		membership,
+		active: false,
+		likes: [{ message: deadMessage, user }],
+	});
+	expect(ack.affectedIds.likes).toEqual([]);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(false);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker + 1);
+});
+
+test("membershipAndLikesBatchTxn rejects a batch spanning two rooms without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const other = await t.run(async (ctx) => {
+		const otherRoom = await ctx.db.insert("rooms", { name: "other" });
+		const m2 = await ctx.db.insert("messages", { room: otherRoom, sender: user, body: "far" });
+		return { m2 };
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(membershipAndLikesBatchTxn, {
+			membership,
+			active: false,
+			likes: [{ message: other.m2, user }],
+		}),
+	).rejects.toThrow(/membership's room/);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(true);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("membershipAndLikesBatchTxn rejects an unknown membership without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	const doomedMembership = await t.run(async (ctx) => {
+		const id = await ctx.db.insert("memberships", { room, user, active: true });
+		return id;
+	});
+	await t.run((ctx) => ctx.db.delete("memberships", doomedMembership));
+	const message = await t.run((ctx) =>
+		ctx.db.insert("messages", { room, sender: user, body: "hello" }),
+	);
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(membershipAndLikesBatchTxn, {
+			membership: doomedMembership,
+			active: false,
+			likes: [{ message, user }],
+		}),
+	).rejects.toThrow(/does not exist/);
+
+	const stored = await t.run(async (ctx) => ({
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("addLike is idempotent and refuses dangling targets", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	const { m1, liker } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+	}));
+
+	const first = await t.mutation(MUTATIONS.addLike!, { message: m1, user: liker });
+	const second = await t.mutation(MUTATIONS.addLike!, { message: m1, user: liker });
+	expect(second.affectedIds["like"]).toBe(first.affectedIds["like"]);
+	const likes = await t.run((ctx) => ctx.db.query("likes").collect());
+	expect(likes).toHaveLength(1);
+
+	await t.run((ctx) => ctx.db.delete("messages", m1));
+	await expect(t.mutation(MUTATIONS.addLike!, { message: m1, user: liker })).rejects.toThrow(
+		/must both exist/,
+	);
+});
+
+test("membershipAndLikesTxn is idempotent on a repeated like", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, liker } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+	}));
+
+	const args = { membership, active: false, message: m1, user: liker };
+	const first = await t.mutation(MUTATIONS.membershipAndLikesTxn!, args);
+	const second = await t.mutation(MUTATIONS.membershipAndLikesTxn!, args);
+	expect(second.affectedIds["like"]).toBe(first.affectedIds["like"]);
+	const likes = await t.run((ctx) => ctx.db.query("likes").collect());
+	expect(likes).toHaveLength(1);
+});
+
 test("each mutation's acks name the rows it wrote", async () => {
 	const t = convexTest(schema, modules);
 	const idByLabel = await runLoadBase(t, corpus.vectors.V3.base as BaseOp[]);

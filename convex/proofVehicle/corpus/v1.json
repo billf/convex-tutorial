@@ -1477,6 +1477,11 @@
 					"name": "Bea"
 				},
 				{
+					"op": "insertUser",
+					"label": "c",
+					"name": "Cy"
+				},
+				{
 					"op": "insertMembership",
 					"label": "ma",
 					"room": "r",
@@ -1515,12 +1520,12 @@
 				{
 					"mutation": "membershipAndLikesTxn",
 					"args": {
-						"membership": "ma",
-						"active": false,
-						"message": "a1",
-						"user": "b"
-					},
-					"label": "l2"
+   "membership": "ma",
+   "active": false,
+   "message": "a1",
+   "user": "c"
+   },
+   "label": "l2"
 				}
 			],
 			"expectedAfterDelta": [
