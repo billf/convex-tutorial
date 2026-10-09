@@ -105,7 +105,7 @@ async function findLike(
 	return likes.find((like) => like.user === user) ?? null;
 }
 
-async function requireLikeTargets(
+async function likeTargetsExist(
 	ctx: MutationCtx,
 	message: Id<"messages">,
 	user: Id<"users">,
@@ -126,7 +126,7 @@ export const addLike = mutation({
 		marker: v.number(),
 	}),
 	handler: async (ctx, args) => {
-		if (!(await requireLikeTargets(ctx, args.message, args.user))) {
+		if (!(await likeTargetsExist(ctx, args.message, args.user))) {
 			throw new Error("addLike: message and user must both exist");
 		}
 		const existing = await findLike(ctx, args.message, args.user);
@@ -169,10 +169,10 @@ export const membershipAndLikesTxn = mutation({
 		marker: v.number(),
 	}),
 	handler: async (ctx, args) => {
-		await ctx.db.patch("memberships", args.membership, { active: args.active });
-		if (!(await requireLikeTargets(ctx, args.message, args.user))) {
+		if (!(await likeTargetsExist(ctx, args.message, args.user))) {
 			throw new Error("membershipAndLikesTxn: message and user must both exist");
 		}
+		await ctx.db.patch("memberships", args.membership, { active: args.active });
 		const existing = await findLike(ctx, args.message, args.user);
 		const like =
 			existing !== null
