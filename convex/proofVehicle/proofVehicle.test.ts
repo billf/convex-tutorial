@@ -44,6 +44,12 @@ const likes = makeFunctionReference<
 	{ _id: Id<"likes">; message: Id<"messages">; user: Id<"users"> }[]
 >("proofVehicle/tables:likes");
 
+const markers = makeFunctionReference<
+	"query",
+	Record<string, never>,
+	{ _id: Id<"proofVehicleMarkers">; _creationTime: number; sequence: number } | null
+>("proofVehicle/tables:markers");
+
 type Ack = { affectedIds: Record<string, string>; marker: number };
 function mutationRef(name: string) {
 	return makeFunctionReference<"mutation", Record<string, unknown>, Ack>(name);
@@ -246,8 +252,9 @@ test("roomFeedPrefix honors n", async () => {
 
 	const prefix3 = await t.query(roomFeedPrefix, { room, n: 3 });
 	expect(prefix3).toHaveLength(3);
-	const prefix50 = await t.query(roomFeedPrefix, { room, n: 50 });
-	expect(prefix50).toHaveLength(10);
+	// Same predicate, order, and projection as roomFeed, just bounded.
+	const full = await t.query(roomFeed, { room });
+	expect(prefix3).toEqual(full.slice(0, 3));
 });
 
 test("roomFeedPrefix with n: 0 returns an empty feed", async () => {
@@ -295,8 +302,9 @@ test("M6 regression: resolveArgs does not rewrite a literal body arg that collid
 	const t = convexTest(schema, modules);
 	// Deliberately label the user "a" and send a message whose body is also
 	// the literal string "a" -- before the fix, resolveArgs would rewrite
-	// the body arg to the user's id (since "a" is a bound label), which
-	// fails the mutation's `body: v.string()` validator.
+	// the body arg to the user's id (since "a" is a bound label), silently
+	// storing the id string as the body (an id satisfies `v.string()`).
+	// The assertion below catches the stored value.
 	const idByLabel = await runLoadBase(t, [
 		{ op: "insertRoom", label: "r", name: "room" },
 		{ op: "insertUser", label: "a", name: "Ada" },
@@ -900,4 +908,34 @@ test("corpus: base and expectedBase agree for every message, in every vector", (
 			expect(baseOp.body, `${key}: expectedBase "${row.id}" body`).toBe(row.body);
 		}
 	}
+});
+
+// M10 regression: by_room_user has no uniqueness guarantee, so duplicate
+// membership rows for one (room, user) pair must not throw -- the pair is
+// active when any matching row is active.
+test("duplicate membership rows resolve by any-active instead of throwing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	await t.run((ctx) => ctx.db.insert("messages", { room, sender: user, body: "hi" }));
+
+	// A racing second insert with the opposite flag: still included, no throw.
+	await t.run((ctx) => ctx.db.insert("memberships", { room, user, active: false }));
+	const included = await t.query(roomFeed, { room });
+	expect(included).toHaveLength(1);
+
+	// All rows inactive: excluded, still no throw.
+	await t.run((ctx) => ctx.db.patch("memberships", membership, { active: false }));
+	const excluded = await t.query(roomFeed, { room });
+	expect(excluded).toHaveLength(0);
+});
+
+// M3 regression: a leftover/double-run marker row must not make the markers
+// query throw -- it reads the latest row.
+test("tables:markers returns the latest row when two marker rows exist", async () => {
+	const t = convexTest(schema, modules);
+	await t.run((ctx) => ctx.db.insert("proofVehicleMarkers", { sequence: 1 }));
+	await t.run((ctx) => ctx.db.insert("proofVehicleMarkers", { sequence: 2 }));
+
+	const latest = await t.query(markers, {});
+	expect(latest?.sequence).toBe(2);
 });

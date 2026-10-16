@@ -74,3 +74,36 @@ test("BR8 (fixed 2026-09-26): a message sent via chat:sendMessage is visible to 
 	const feed = await t.query(roomFeed, { room });
 	expect(feed).toHaveLength(1);
 });
+
+test("BR8 follow-up: sending after deactivation reactivates the membership", async () => {
+	const t = convexTest(schema, modules);
+	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
+	await t.mutation(api.chat.sendMessage, { user: userId, body: "first" });
+
+	// Simulate leaving the room, then sending again (rejoin-on-send).
+	const [membership] = await t.run((ctx) => ctx.db.query("memberships").collect());
+	await t.run((ctx) => ctx.db.patch("memberships", membership!._id, { active: false }));
+	await t.mutation(api.chat.sendMessage, { user: userId, body: "second" });
+
+	const rows = await t.run((ctx) => ctx.db.query("memberships").collect());
+	expect(rows).toHaveLength(1);
+	expect(rows[0]!.active).toBe(true);
+
+	const room = await t.run(async (ctx) => {
+		const [firstRoom] = await ctx.db.query("rooms").take(1);
+		return firstRoom!._id;
+	});
+	const feed = await t.query(roomFeed, { room });
+	expect(feed).toHaveLength(2);
+});
+
+test("BR8 follow-up: repeated sends do not duplicate the membership row", async () => {
+	const t = convexTest(schema, modules);
+	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
+	await t.mutation(api.chat.sendMessage, { user: userId, body: "one" });
+	await t.mutation(api.chat.sendMessage, { user: userId, body: "two" });
+
+	const rows = await t.run((ctx) => ctx.db.query("memberships").collect());
+	expect(rows).toHaveLength(1);
+	expect(rows[0]!.active).toBe(true);
+});

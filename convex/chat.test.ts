@@ -6,7 +6,7 @@ import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
 
-// Branch-review BR3: getMessages's `if (room === null) return []` guard
+// Branch-review BR3: getMessages's `if (room === undefined)` guard
 // (the case before any message has ever been sent, on a genuinely fresh
 // deployment) was never exercised by any prior test -- every other case
 // calls sendMessage first, which lazily creates the room.
@@ -79,4 +79,20 @@ test('getMessages falls back to "Unknown" when a message\'s user no longer resol
 	const messages = await t.query(api.chat.getMessages, {});
 	expect(messages).toHaveLength(1);
 	expect(messages[0].name).toBe("Unknown");
+});
+
+// M1 regression: by_name has no uniqueness guarantee, so two "general"
+// rooms must not make getMessages throw -- it reads the oldest match.
+test("getMessages tolerates duplicate default rooms and reads the oldest", async () => {
+	const t = convexTest(schema, modules);
+	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
+	const firstRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: "general" }));
+	const secondRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: "general" }));
+	await t.run((ctx) => ctx.db.insert("messages", { room: firstRoom, sender: userId, body: "old" }));
+	await t.run((ctx) =>
+		ctx.db.insert("messages", { room: secondRoom, sender: userId, body: "new" }),
+	);
+
+	const messages = await t.query(api.chat.getMessages, {});
+	expect(messages.map((message) => message.body)).toEqual(["old"]);
 });

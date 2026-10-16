@@ -87,7 +87,7 @@ export function legacyMessagesPresent(messageRows: readonly Record<string, unkno
 
 type Phase = { table: "rooms" | "users" | "memberships" | "messages" | "likes"; ops: BaseOp[] };
 
-/** Splits a vector's base ops into the four sequential import phases KTD5 specifies. */
+/** Splits a vector's base ops into the five sequential import phases KTD5 specifies. */
 export function planImportPhases(ops: readonly BaseOp[]): Phase[] {
 	const byTable: Record<Phase["table"], BaseOp[]> = {
 		rooms: [],
