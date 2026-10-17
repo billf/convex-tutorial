@@ -155,7 +155,10 @@ export const removeLike = mutation({
  * mutation, so a subscriber can never observe one change without the
  * other (P3's single-write invariant, applied at the Convex source).
  * The like is idempotent like `addLike`, and throws on a dangling
- * message or user instead of writing an orphan.
+ * message or user instead of writing an orphan. Like the batch variant,
+ * it throws on an unknown membership and when the liked message lives in
+ * a different room than the patched membership, so one marker never
+ * spans two rooms' deltas.
  */
 export const membershipAndLikesTxn = mutation({
 	args: {
@@ -169,8 +172,23 @@ export const membershipAndLikesTxn = mutation({
 		marker: v.number(),
 	}),
 	handler: async (ctx, args) => {
-		if (!(await likeTargetsExist(ctx, args.message, args.user))) {
+		// Validate everything before writing anything: membership, then
+		// like targets, then the single-room invariant.
+		const membershipDoc = await ctx.db.get("memberships", args.membership);
+		if (membershipDoc === null) {
+			throw new Error("membershipAndLikesTxn: membership does not exist");
+		}
+		const [messageDoc, userDoc] = await Promise.all([
+			ctx.db.get("messages", args.message),
+			ctx.db.get("users", args.user),
+		]);
+		if (messageDoc === null || userDoc === null) {
 			throw new Error("membershipAndLikesTxn: message and user must both exist");
+		}
+		if (messageDoc.room !== membershipDoc.room) {
+			throw new Error(
+				"membershipAndLikesTxn: the liked message must be in the membership's room",
+			);
 		}
 		await ctx.db.patch("memberships", args.membership, { active: args.active });
 		const existing = await findLike(ctx, args.message, args.user);
@@ -228,8 +246,11 @@ export const membershipAndLikesBatchTxn = mutation({
 				return { like, messageDoc, userDoc };
 			}),
 		);
-		for (const { like, messageDoc } of targets) {
-			if (messageDoc === null) continue;
+		for (const { messageDoc, userDoc } of targets) {
+			// Skip dangling entries before the room check, matching the write
+			// loop below: a cross-room entry whose user no longer exists is
+			// skipped, not rejected.
+			if (messageDoc === null || userDoc === null) continue;
 			if (messageDoc.room !== membershipDoc.room) {
 				throw new Error(
 					"membershipAndLikesBatchTxn: every liked message must be in the membership's room",

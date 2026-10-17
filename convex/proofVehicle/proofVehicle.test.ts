@@ -737,6 +737,98 @@ test("membershipAndLikesTxn is idempotent on a repeated like", async () => {
 	expect(likes).toHaveLength(1);
 });
 
+test("membershipAndLikesTxn rejects an unknown membership without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	const { m1, liker, doomedMembership } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+		doomedMembership: await ctx.db.insert("memberships", { room, user, active: true }),
+	}));
+	await t.run((ctx) => ctx.db.delete("memberships", doomedMembership));
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership: doomedMembership,
+			active: false,
+			message: m1,
+			user: liker,
+		}),
+	).rejects.toThrow(/does not exist/);
+
+	const stored = await t.run(async (ctx) => ({
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("membershipAndLikesTxn rejects a like spanning two rooms without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { user, membership } = await seedRoomWithMember(t);
+	const { far, liker } = await t.run(async (ctx) => {
+		const otherRoom = await ctx.db.insert("rooms", { name: "other" });
+		return {
+			far: await ctx.db.insert("messages", { room: otherRoom, sender: user, body: "far" }),
+			liker: await ctx.db.insert("users", { name: "Liker" }),
+		};
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership,
+			active: false,
+			message: far,
+			user: liker,
+		}),
+	).rejects.toThrow(/membership's room/);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(true);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("membershipAndLikesBatchTxn skips a cross-room entry whose user no longer exists", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, liker, far, ghost } = await t.run(async (ctx) => {
+		const otherRoom = await ctx.db.insert("rooms", { name: "other" });
+		return {
+			m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+			liker: await ctx.db.insert("users", { name: "Liker" }),
+			far: await ctx.db.insert("messages", { room: otherRoom, sender: user, body: "far" }),
+			ghost: await ctx.db.insert("users", { name: "Ghost" }),
+		};
+	});
+	await t.run((ctx) => ctx.db.delete("users", ghost));
+
+	const ack = await t.mutation(membershipAndLikesBatchTxn, {
+		membership,
+		active: false,
+		likes: [
+			{ message: m1, user: liker },
+			{ message: far, user: ghost },
+		],
+	});
+	// The live pair is written; the dangling cross-room entry is skipped, not rejected.
+	expect(ack.affectedIds.likes).toHaveLength(1);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+	}));
+	expect(stored.membership?.active).toBe(false);
+	expect(stored.likes.map((like) => [like?.message, like?.user])).toEqual([[m1, liker]]);
+});
+
 test("each mutation's acks name the rows it wrote", async () => {
 	const t = convexTest(schema, modules);
 	const idByLabel = await runLoadBase(t, corpus.vectors.V3.base as BaseOp[]);
