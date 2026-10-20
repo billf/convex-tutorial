@@ -13,24 +13,22 @@ import parity from "./corpus/v1.parity.json";
 // instead of "../proofVehicle/feed.ts", which convex-test cannot resolve.
 const modules = import.meta.glob("/convex/**/*.ts");
 
-const roomFeed = makeFunctionReference<
-	"query",
-	{ room: Id<"rooms"> },
-	{
-		_id: Id<"messages">;
-		_creationTime: number;
-		room: Id<"rooms">;
-		body: string;
-		sender: { _id: Id<"users">; name: string } | null;
-		likeCount: number;
-	}[]
->("proofVehicle/feed:roomFeed");
+type FeedRow = {
+	_id: Id<"messages">;
+	_creationTime: number;
+	room: Id<"rooms">;
+	body: string;
+	sender: { _id: Id<"users">; name: string } | null;
+	likeCount: number;
+};
 
-const roomFeedPrefix = makeFunctionReference<
-	"query",
-	{ room: Id<"rooms">; n: number },
-	unknown[]
->("proofVehicle/feed:roomFeedPrefix");
+const roomFeed = makeFunctionReference<"query", { room: Id<"rooms"> }, FeedRow[]>(
+	"proofVehicle/feed:roomFeed",
+);
+
+const roomFeedPrefix = makeFunctionReference<"query", { room: Id<"rooms">; n: number }, FeedRow[]>(
+	"proofVehicle/feed:roomFeedPrefix",
+);
 
 const allSelectedRows = makeFunctionReference<
 	"query",
@@ -65,6 +63,7 @@ const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
 	addLike: mutationRef("proofVehicle/mutations:addLike"),
 	removeLike: mutationRef("proofVehicle/mutations:removeLike"),
 	membershipAndLikesTxn: mutationRef("proofVehicle/mutations:membershipAndLikesTxn"),
+	membershipAndLikesBatchTxn: mutationRef("proofVehicle/mutations:membershipAndLikesBatchTxn"),
 };
 
 // One descriptor per mutation for the delta-test harness, covering both
@@ -81,8 +80,16 @@ const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
 //   literal body/name string equal to some other row's label (corpus V2
 //   already has both a user labeled "a" and a message body "a") would have
 //   silently sent an id where a string was expected.
+// - `nestedIdArgKeys`: for mutations taking arrays of id-bearing objects
+//   (only `membershipAndLikesBatchTxn`'s `likes[]` today), the per-entry
+//   keys to resolve the same way -- without it, label strings inside
+//   `likes[]` pass through unresolved and fail the mutation's `v.id`
+//   validators (the M6 failure class, one level down).
 // A parity test below pins this map's key set to the registered MUTATIONS.
-const MUTATION_TEST_META: Record<string, { bindKey: string; idArgKeys: readonly string[] }> = {
+const MUTATION_TEST_META: Record<
+	string,
+	{ bindKey: string; idArgKeys: readonly string[]; nestedIdArgKeys?: Record<string, readonly string[]> }
+> = {
 	sendMessage: { bindKey: "message", idArgKeys: ["room", "sender"] },
 	updateMessageBody: { bindKey: "message", idArgKeys: ["message"] },
 	deleteMessage: { bindKey: "message", idArgKeys: ["message"] },
@@ -92,10 +99,74 @@ const MUTATION_TEST_META: Record<string, { bindKey: string; idArgKeys: readonly 
 	addLike: { bindKey: "like", idArgKeys: ["message", "user"] },
 	removeLike: { bindKey: "like", idArgKeys: ["like"] },
 	membershipAndLikesTxn: { bindKey: "like", idArgKeys: ["membership", "message", "user"] },
+	membershipAndLikesBatchTxn: {
+		bindKey: "membership",
+		idArgKeys: ["membership"],
+		nestedIdArgKeys: { likes: ["message", "user"] },
+	},
 };
 
 test("MUTATION_TEST_META covers exactly the registered MUTATIONS", () => {
 	expect(new Set(Object.keys(MUTATION_TEST_META))).toEqual(new Set(Object.keys(MUTATIONS)));
+});
+
+// Every MUTATION_TEST_META `bindKey` names a key its mutation's ack
+// actually returns: the key-set parity test above cannot catch a mistyped
+// value, so each mutation runs once against real rows and its ack is
+// checked for the bound key. Deletes run last; nothing here depends on
+// the order beyond that.
+test("every MUTATION_TEST_META bindKey is present in its mutation's ack", async () => {
+	const t = convexTest(schema, modules);
+	const ids = await t.run(async (ctx) => {
+		const room = await ctx.db.insert("rooms", { name: "r" });
+		const user = await ctx.db.insert("users", { name: "u" });
+		const membership = await ctx.db.insert("memberships", { room, user, active: true });
+		const message = await ctx.db.insert("messages", { room, sender: user, body: "m" });
+		return { room, user, membership, message };
+	});
+	const acked = async (name: string, args: Record<string, unknown>): Promise<Record<string, string>> => {
+		const ack = await t.mutation(MUTATIONS[name]!, args);
+		return ack.affectedIds;
+	};
+	const check = (name: string, affectedIds: Record<string, string>) => {
+		const bindKey = MUTATION_TEST_META[name]?.bindKey;
+		expect(bindKey, `${name} has a bindKey`).toBeDefined();
+		expect(affectedIds[bindKey!], `${name} ack names ${bindKey}`).toBeDefined();
+	};
+
+	const sendAck = await acked("sendMessage", { room: ids.room, sender: ids.user, body: "n" });
+	check("sendMessage", sendAck);
+	check(
+		"updateMessageBody",
+		await acked("updateMessageBody", { message: sendAck["message"], body: "n2" }),
+	);
+	const likeAck = await acked("addLike", { message: ids.message, user: ids.user });
+	check("addLike", likeAck);
+	check("removeLike", await acked("removeLike", { like: likeAck["like"] }));
+	check(
+		"setMembershipActive",
+		await acked("setMembershipActive", { membership: ids.membership, active: false }),
+	);
+	check(
+		"membershipAndLikesTxn",
+		await acked("membershipAndLikesTxn", {
+			membership: ids.membership,
+			active: true,
+			message: ids.message,
+			user: ids.user,
+		}),
+	);
+	check(
+		"membershipAndLikesBatchTxn",
+		await acked("membershipAndLikesBatchTxn", {
+			membership: ids.membership,
+			active: true,
+			likes: [{ message: ids.message, user: ids.user }],
+		}),
+	);
+	check("deleteMessage", await acked("deleteMessage", { message: sendAck["message"] }));
+	check("renameUser", await acked("renameUser", { user: ids.user, name: "v" }));
+	check("deleteUser", await acked("deleteUser", { user: ids.user }));
 });
 
 const fixtureMarker = makeFunctionReference<"mutation", Record<string, never>, { marker: number }>(
@@ -144,15 +215,39 @@ function resolveArgs(
 	idByLabel: ReadonlyMap<string, Id<TableNames>>,
 ): Record<string, unknown> {
 	const idKeys = new Set(MUTATION_TEST_META[mutationName]?.idArgKeys ?? []);
+	const nestedKeys = MUTATION_TEST_META[mutationName]?.nestedIdArgKeys;
 	const out: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(args)) {
 		if (idKeys.has(key) && typeof value === "string" && idByLabel.has(value)) {
 			out[key] = idByLabel.get(value);
+		} else if (nestedKeys !== undefined && Array.isArray(value)) {
+			out[key] = resolveNestedIds(nestedKeys[key], value, idByLabel);
 		} else {
 			out[key] = value;
 		}
 	}
 	return out;
+}
+
+/** Resolves label ids inside one array arg's entries (e.g. batch likes[]); entries that are not id-bearing objects pass through unchanged. */
+function resolveNestedIds(
+	entryKeys: readonly string[] | undefined,
+	entries: unknown[],
+	idByLabel: ReadonlyMap<string, Id<TableNames>>,
+): unknown[] {
+	if (entryKeys === undefined) return entries;
+	const keySet = new Set(entryKeys);
+	return entries.map((entry) => {
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return entry;
+		const mapped: Record<string, unknown> = {};
+		for (const [entryKey, entryValue] of Object.entries(entry)) {
+			mapped[entryKey] =
+				keySet.has(entryKey) && typeof entryValue === "string" && idByLabel.has(entryValue)
+					? idByLabel.get(entryValue)
+					: entryValue;
+		}
+		return mapped;
+	});
 }
 
 async function seedRoomWithMember(t: ReturnType<typeof convexTest>) {
@@ -252,6 +347,8 @@ test("roomFeedPrefix honors n", async () => {
 
 	const prefix3 = await t.query(roomFeedPrefix, { room, n: 3 });
 	expect(prefix3).toHaveLength(3);
+	// Literal bodies, not just length: the three most recent inserts first.
+	expect(prefix3.map((row) => row.body)).toEqual(["m9", "m8", "m7"]);
 	// Same predicate, order, and projection as roomFeed, just bounded.
 	const full = await t.query(roomFeed, { room });
 	expect(prefix3).toEqual(full.slice(0, 3));
@@ -319,6 +416,36 @@ test("M6 regression: resolveArgs does not rewrite a literal body arg that collid
 	expect(stored?.body).toBe("a");
 });
 
+// #5: the delta harness resolves nested likes[] label ids for the batch
+// txn (M6-class, one level down). Without nested resolution the label
+// strings would reach the mutation's `v.id` validators and throw instead
+// of landing on the named rows.
+test("applyDelta resolves nested likes[] labels for membershipAndLikesBatchTxn", async () => {
+	const t = convexTest(schema, modules);
+	const ids = await t.run(async (ctx) => {
+		const room = await ctx.db.insert("rooms", { name: "r" });
+		const user = await ctx.db.insert("users", { name: "u" });
+		const membership = await ctx.db.insert("memberships", { room, user, active: true });
+		const message = await ctx.db.insert("messages", { room, sender: user, body: "m" });
+		return { room, user, membership, message };
+	});
+	const idByLabel = new Map<string, Id<TableNames>>([
+		["r", ids.room],
+		["u", ids.user],
+		["mem", ids.membership],
+		["m", ids.message],
+	]);
+	const ack = await applyDelta(t, idByLabel, {
+		mutation: "membershipAndLikesBatchTxn",
+		args: { membership: "mem", active: true, likes: [{ message: "m", user: "u" }] },
+	});
+	expect(ack.marker).toBeGreaterThan(0);
+	const likes = await t.run((ctx) => ctx.db.query("likes").collect());
+	expect(likes).toHaveLength(1);
+	expect(likes[0]!.message).toBe(ids.message);
+	expect(likes[0]!.user).toBe(ids.user);
+});
+
 test("allSelectedRows returns every row, each tagged with its table, including the marker row", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user } = await seedRoomWithMember(t);
@@ -339,6 +466,13 @@ test("allSelectedRows returns every row, each tagged with its table, including t
 	expect(byTable.get("messages")).toBe(1);
 	expect(byTable.get("likes")).toBe(1);
 	expect(byTable.get("marker")).toBe(1);
+	// Identity, not just counts: a tag rotation or cross-table doc swap
+	// must fail even when every count stays 1.
+	expect(rows.find((row) => row.table === "rooms")?.doc._id).toBe(room);
+	expect(rows.find((row) => row.table === "users")?.doc._id).toBe(user);
+	expect(rows.find((row) => row.table === "messages")?.doc.body).toBe("hi");
+	expect(rows.find((row) => row.table === "likes")?.doc.message).toBe(messageId);
+	expect(rows.find((row) => row.table === "marker")?.doc.sequence).toBe(1);
 });
 
 // --- U5: corpus-driven mutation tests ------------------------------------
@@ -429,8 +563,9 @@ test("V4 (exact 50-row boundary and ID tie): the excluded 51st row and the inclu
 		expect(row.sender).toEqual({ _id: idByLabel.get("a"), name: "Ada" });
 		expect(row.likeCount).toBe(0);
 	}
-	// The literal m51-before-m50 tie-break is proven by the snapshot
-	// reference run (U11); see the corpus vector's own "note" field.
+	// The literal m51-before-m50 tie-break order is deployment-
+	// nondeterministic (Convex assigns IDs randomly); U11 must compare the
+	// tied pair as a set, per the corpus vector's own "note" field.
 });
 
 test("V5 (deletes): each independent delta, applied to a fresh copy of the base, matches its own expected output", async () => {
@@ -823,20 +958,63 @@ test("V4's tied rows carry message-<bound label> bodies after the patch", async 
 	expect(after?._creationTime).toBe(before?._creationTime);
 });
 
+/** Rewrites raw row ids to corpus labels so two independently loaded copies compare equal. */
+function normalizeIds(value: unknown, labelByRawId: ReadonlyMap<string, string>): unknown {
+	if (typeof value === "string") return labelByRawId.get(value) ?? value;
+	if (Array.isArray(value)) return value.map((entry) => normalizeIds(entry, labelByRawId));
+	if (typeof value === "object" && value !== null) {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, entry]) => [key, normalizeIds(entry, labelByRawId)]),
+		);
+	}
+	return value;
+}
+
+/** Label-mapped parity hashes of all five tables for one loaded copy. */
+async function tablesParity(
+	t: ReturnType<typeof convexTest>,
+	idByLabel: Map<string, Id<TableNames>>,
+) {
+	const labelByRawId = new Map<string, string>();
+	for (const [label, id] of idByLabel) labelByRawId.set(id, label);
+	const hashes: Record<string, unknown> = {};
+	for (const table of PARITY_TABLES) {
+		const rows = await t.run((ctx) => ctx.db.query(table).collect());
+		hashes[table] = await computeParity(rows, labelByRawId);
+	}
+	return { hashes, labelByRawId };
+}
+
 test("AE14: replaying one delta log into two independently loaded copies yields equal label-mapped parity hashes", async () => {
-	const vector = corpus.vectors.V5;
-	const loadAndComputeParity = async () => {
+	const vector = corpus.vectors.V3;
+	const deltas = vector.deltas as { mutation: string; args: Record<string, unknown>; label?: string }[];
+	const loadAndReplay = async () => {
 		const t = convexTest(schema, modules);
 		const idByLabel = await runLoadBase(t, vector.base as BaseOp[]);
-		const labelByRawId = new Map<string, string>();
-		for (const [label, id] of idByLabel) labelByRawId.set(id, label);
-		const rows = await t.run((ctx) => ctx.db.query("messages").collect());
-		return computeParity(rows, labelByRawId);
+		for (const delta of deltas) {
+			await applyDelta(t, idByLabel, delta);
+		}
+		return { t, idByLabel };
 	};
 
-	const parityA = await loadAndComputeParity();
-	const parityB = await loadAndComputeParity();
-	expect(parityA).toEqual(parityB);
+	const first = await loadAndReplay();
+	const second = await loadAndReplay();
+	const firstState = await tablesParity(first.t, first.idByLabel);
+	const secondState = await tablesParity(second.t, second.idByLabel);
+	expect(firstState.hashes).toEqual(secondState.hashes);
+
+	const room = first.idByLabel.get("r") as Id<"rooms">;
+	const feedA = normalizeIds(await feedFor(first.t, room), firstState.labelByRawId);
+	const feedB = normalizeIds(await feedFor(second.t, room), secondState.labelByRawId);
+	expect(feedA).toEqual(feedB);
+
+	// The replayed deltas took effect: post-replay hashes differ from base-only.
+	const base = await (async () => {
+		const t = convexTest(schema, modules);
+		const idByLabel = await runLoadBase(t, vector.base as BaseOp[]);
+		return tablesParity(t, idByLabel);
+	})();
+	expect(firstState.hashes).not.toEqual(base.hashes);
 });
 
 test("AE14: a load that omits one mutation produces a different parity hash", async () => {
@@ -845,23 +1023,17 @@ test("AE14: a load that omits one mutation produces a different parity hash", as
 		const t = convexTest(schema, modules);
 		const idByLabel = await runLoadBase(t, vector.base as BaseOp[]);
 		await applyDelta(t, idByLabel, (vector.deltas as { mutation: string; args: Record<string, unknown> }[])[0]!);
-		const labelByRawId = new Map<string, string>();
-		for (const [label, id] of idByLabel) labelByRawId.set(id, label);
-		const rows = await t.run((ctx) => ctx.db.query("users").collect());
-		return computeParity(rows, labelByRawId);
+		return tablesParity(t, idByLabel);
 	})();
 
 	const partial = await (async () => {
 		const t = convexTest(schema, modules);
 		const idByLabel = await runLoadBase(t, vector.base as BaseOp[]);
 		// Omits the delta (deleteUser) a real replay would have applied.
-		const labelByRawId = new Map<string, string>();
-		for (const [label, id] of idByLabel) labelByRawId.set(id, label);
-		const rows = await t.run((ctx) => ctx.db.query("users").collect());
-		return computeParity(rows, labelByRawId);
+		return tablesParity(t, idByLabel);
 	})();
 
-	expect(full.contentHash).not.toBe(partial.contentHash);
+	expect(full.hashes).not.toEqual(partial.hashes);
 });
 
 const PARITY_TABLES = ["rooms", "users", "memberships", "messages", "likes"] as const;
@@ -938,4 +1110,35 @@ test("tables:markers returns the latest row when two marker rows exist", async (
 
 	const latest = await t.query(markers, {});
 	expect(latest?.sequence).toBe(2);
+});
+
+// #6: the read path shares bumpMarker's max-sequence definition of latest,
+// so when max-sequence and latest-created disagree the query still returns
+// the row the next bump would advance.
+test("tables:markers returns the highest sequence when creation order disagrees", async () => {
+	const t = convexTest(schema, modules);
+	await t.run((ctx) => ctx.db.insert("proofVehicleMarkers", { sequence: 5 }));
+	await t.run((ctx) => ctx.db.insert("proofVehicleMarkers", { sequence: 2 }));
+
+	const latest = await t.query(markers, {});
+	expect(latest?.sequence).toBe(5);
+});
+
+// P1 regression (#2): duplicate marker rows must not brick harness writes.
+// bumpMarker picks the highest sequence (not merely the latest-created row),
+// advances past it, and deletes the extras so the next bump sees one row.
+test("fixture:marker recovers from duplicate marker rows and keeps advancing", async () => {
+	const t = convexTest(schema, modules);
+	await t.run((ctx) => ctx.db.insert("proofVehicleMarkers", { sequence: 5 }));
+	await t.run((ctx) => ctx.db.insert("proofVehicleMarkers", { sequence: 2 }));
+
+	const ack = await t.mutation(fixtureMarker, {});
+	expect(ack.marker).toBe(6);
+
+	const rows = await t.run((ctx) => ctx.db.query("proofVehicleMarkers").collect());
+	expect(rows).toHaveLength(1);
+	expect(rows[0]!.sequence).toBe(6);
+
+	const again = await t.mutation(fixtureMarker, {});
+	expect(again.marker).toBe(7);
 });

@@ -2,6 +2,7 @@
 import { convexTest } from "convex-test";
 import { expect, test } from "vitest";
 import { api } from "./_generated/api";
+import { DEFAULT_ROOM_NAME } from "./chat";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
@@ -86,8 +87,8 @@ test('getMessages falls back to "Unknown" when a message\'s user no longer resol
 test("getMessages tolerates duplicate default rooms and reads the oldest", async () => {
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
-	const firstRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: "general" }));
-	const secondRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: "general" }));
+	const firstRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+	const secondRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
 	await t.run((ctx) => ctx.db.insert("messages", { room: firstRoom, sender: userId, body: "old" }));
 	await t.run((ctx) =>
 		ctx.db.insert("messages", { room: secondRoom, sender: userId, body: "new" }),
@@ -95,4 +96,20 @@ test("getMessages tolerates duplicate default rooms and reads the oldest", async
 
 	const messages = await t.query(api.chat.getMessages, {});
 	expect(messages.map((message) => message.body)).toEqual(["old"]);
+});
+
+// Creator convergence: when duplicate "general" rooms already exist (manual
+// seeding, a second backend), sendMessage writes into the oldest one, so
+// traffic converges instead of fanning out across the duplicates.
+test("sendMessage with duplicate default rooms writes into the oldest", async () => {
+	const t = convexTest(schema, modules);
+	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
+	const firstRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+	await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+
+	await t.mutation(api.chat.sendMessage, { user: userId, body: "hi" });
+
+	const messages = await t.run((ctx) => ctx.db.query("messages").collect());
+	expect(messages).toHaveLength(1);
+	expect(messages[0].room).toBe(firstRoom);
 });
