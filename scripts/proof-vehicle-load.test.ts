@@ -3,13 +3,18 @@ import {
 	buildImportRows,
 	computeNonEmptyTables,
 	importArgs,
+	importEnv,
+	indexRowsByNaturalKey,
 	legacyMessagesPresent,
 	naturalKey,
 	planImportPhases,
+	redactSecrets,
 	resolveImportTarget,
+	withDeadline,
 } from "./proof-vehicle-load";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp } from "../convex/proofVehicle/fixture";
+import { groupOpsByPhase } from "../convex/proofVehicle/basePlan";
 
 test("legacyMessagesPresent detects a pre-migration {user, body} row", () => {
 	expect(legacyMessagesPresent([{ room: "r1", sender: "u1", body: "hi" }])).toBe(false);
@@ -32,6 +37,24 @@ test("planImportPhases orders V4's message phase ascending by creationTime, tie 
 	// own declared order (m51 before m50) for the tie.
 	expect(messages.at(-2)).toMatchObject({ label: "m51" });
 	expect(messages.at(-1)).toMatchObject({ label: "m50" });
+});
+
+// The deployment loader and convex-test's loadBaseIntoConvexTest execute
+// one shared plan (basePlan.groupOpsByPhase): this pins planImportPhases
+// to it -- same phase tables in order, same message label order -- for
+// every vector, so a future separate re-implementation fails loudly.
+test("planImportPhases follows the shared groupOpsByPhase plan for every vector", () => {
+	for (const vector of Object.values(corpus.vectors)) {
+		const ops = vector.base as BaseOp[];
+		const shared = groupOpsByPhase(ops).filter((phase) => phase.ops.length > 0);
+		const planned = planImportPhases(ops);
+		expect(planned.map((phase) => phase.table)).toEqual(shared.map((phase) => phase.table));
+		for (const phase of planned) {
+			const labels = (table: string) =>
+				shared.find((p) => p.table === table)?.ops.map((op) => op.label);
+			expect(phase.ops.map((op) => op.label)).toEqual(labels(phase.table));
+		}
+	}
 });
 
 test("buildImportRows resolves memberships' room/user labels to real ids", () => {
@@ -151,34 +174,70 @@ test("resolveImportTarget rejects a missing admin key before any import", () => 
 	).toThrow(/PROOF_VEHICLE_ADMIN_KEY/);
 });
 
-// I2d/KTD5: every import carries --url/--admin-key and never
-// --deployment on the self-hosted path.
-test("importArgs passes the target URL and key to each import, without --deployment", () => {
-	const args = importArgs("rooms", "/tmp/rooms.jsonl", true, {
-		url: "http://127.0.0.1:3210",
-		adminKey: "k",
-	});
-	expect(args).toEqual([
-		"convex",
-		"import",
-		"--url",
-		"http://127.0.0.1:3210",
-		"--admin-key",
-		"k",
-		"--table",
-		"rooms",
-		"--yes",
-		"--replace",
-		"/tmp/rooms.jsonl",
-	]);
+// I2d/KTD5: the deployment binding travels in the child environment, never
+// in argv -- --admin-key on the command line is ps-visible, and Node
+// embeds argv in exec-failure messages that land in logs.
+test("importArgs carries no credentials and never --deployment", () => {
+	const args = importArgs("rooms", "/tmp/rooms.jsonl", true);
+	expect(args).toEqual(["convex", "import", "--table", "rooms", "--yes", "--replace", "/tmp/rooms.jsonl"]);
+	expect(args).not.toContain("--url");
+	expect(args).not.toContain("--admin-key");
 	expect(args).not.toContain("--deployment");
 });
 
 test("importArgs omits --replace for non-replace phases", () => {
-	const args = importArgs("likes", "/tmp/likes.jsonl", false, {
-		url: "http://127.0.0.1:3210",
-		adminKey: "k",
-	});
+	const args = importArgs("likes", "/tmp/likes.jsonl", false);
 	expect(args).not.toContain("--replace");
 	expect(args).not.toContain("--deployment");
+});
+
+test("importEnv binds the child to the target deployment via env, dropping CONVEX_DEPLOYMENT", () => {
+	const env = importEnv(
+		{ url: "http://127.0.0.1:3210", adminKey: "k" },
+		{ PATH: "/bin", CONVEX_DEPLOYMENT: "prod:abc", CONVEX_URL: "http://other:3210" },
+	);
+	expect(env["CONVEX_SELF_HOSTED_URL"]).toBe("http://127.0.0.1:3210");
+	expect(env["CONVEX_SELF_HOSTED_ADMIN_KEY"]).toBe("k");
+	expect(env["CONVEX_DEPLOYMENT"]).toBeUndefined();
+	expect(env["PATH"]).toBe("/bin");
+});
+
+test("redactSecrets strips the admin key from text bound for logs", () => {
+	const target = { url: "http://127.0.0.1:3210", adminKey: "secret-key" };
+	expect(redactSecrets("Command failed: npx convex import secret-key", target)).toBe(
+		"Command failed: npx convex import [redacted-admin-key]",
+	);
+	expect(redactSecrets("unrelated failure, no key here", target)).toBe(
+		"unrelated failure, no key here",
+	);
+});
+
+test("indexRowsByNaturalKey maps unique rows and throws loudly on duplicates", () => {
+	expect(
+		indexRowsByNaturalKey("users", [
+			{ _id: "u1", name: "Ada" },
+			{ _id: "u2", name: "Bob" },
+		]),
+	).toEqual(
+		new Map([
+			["Ada", "u1"],
+			["Bob", "u2"],
+		]),
+	);
+	expect(() =>
+		indexRowsByNaturalKey("messages", [
+			{ _id: "m1", body: "same" },
+			{ _id: "m2", body: "same" },
+		]),
+	).toThrow(/duplicate messages rows share natural key "same"/);
+});
+
+test("withDeadline resolves fast reads and names hung ones", async () => {
+	await expect(withDeadline(Promise.resolve(42), 1000, "fast read")).resolves.toBe(42);
+	await expect(withDeadline(new Promise(() => {}), 10, "hung read")).rejects.toThrow(
+		/hung read timed out after 10ms/,
+	);
+	await expect(withDeadline(Promise.reject(new Error("inner boom")), 1000, "sad")).rejects.toThrow(
+		/inner boom/,
+	);
 });

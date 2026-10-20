@@ -10,8 +10,8 @@
  * label binding. Prints the label-binding map as JSON on stdout so a caller
  * (a harness, or a human) never has to infer real IDs.
  *
- * Does NOT perform V4's post-bind body patch (`proofVehicle/fixture:
- * patchMessageBody`): m50/m51's bodies import verbatim from the corpus.
+ * Does NOT perform V4's post-bind body patch (`proofVehicle/mutations:
+ * updateMessageBody`): m50/m51's bodies import verbatim from the corpus.
  * That means the m50/m51 *label binding* is
  * correct (bodies are distinct per-op strings), but the literal
  * m51-before-m50 _creationTime tie order this loader is supposed to prove
@@ -20,21 +20,19 @@
  * patch step if one turns out to be needed, and proving the tie order --
  * are the snapshot reference run's job (U11), not this script's.
  *
- * Usage: npx tsx scripts/proof-vehicle-load.ts <V1|V2|V3|V4|V5|V6>
- *
  * Requires CONVEX_URL and PROOF_VEHICLE_ADMIN_KEY in this process's
  * environment (`tsx` does not load `.env.local` automatically): the URL
- * names the self-hosted deployment for reads, and the same URL plus key
- * are passed explicitly to every `npx convex import` (no `--deployment`
- * -- the Convex CLI does not allow it with self-hosted credentials), so
+ * names the self-hosted deployment for reads, and both values are passed
+ * explicitly into every `npx convex import` child's environment as
+ * CONVEX_SELF_HOSTED_URL / CONVEX_SELF_HOSTED_ADMIN_KEY (the Convex CLI's
+ * documented env alternative to `--url`/`--admin-key`; the key never
+ * appears in argv, where `ps` and exec-failure logs would expose it), so
  * writes cannot silently default to a different deployment than reads
  * use. Also requires PROOF_VEHICLE_FIXTURE=1 set on that deployment if a
- * delta calls `fixture:reset` -- set it with the same --url/--admin-key
- * binding as every import here, e.g.
- * `npx convex env set PROOF_VEHICLE_FIXTURE 1 --url "$CONVEX_URL"
- * --admin-key "$PROOF_VEHICLE_ADMIN_KEY"`. A bare `npx convex env set`
- * (no --url/--admin-key) targets the CLI's own default dev deployment
- * instead, which can silently differ from CONVEX_URL.
+ * delta calls `fixture:reset` -- set it with the same URL/key binding as
+ * every import here, e.g. via the same child-env mechanism. A bare
+ * `npx convex env set` (no URL/key binding) targets the CLI's own default
+ * dev deployment instead, which can silently differ from CONVEX_URL.
  *
  * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
  * import with `--replace`, which clears those tables entirely -- and
@@ -42,9 +40,11 @@
  * tables. This loader refuses to run against any deployment where
  * rooms/users/memberships/messages/likes already has rows (a `npm run dev`
  * deployment always does, from its first chat message onward). Reset first
- * with `npx convex run proofVehicle/fixture:reset '{}' --url "$CONVEX_URL"
- * --admin-key "$PROOF_VEHICLE_ADMIN_KEY"` (requires `PROOF_VEHICLE_FIXTURE=1`
- * on that deployment; the same --url/--admin-key binding matters here too
+ * with the key in the environment, never in argv (argv is ps-visible):
+ * `CONVEX_SELF_HOSTED_URL="$CONVEX_URL"
+ * CONVEX_SELF_HOSTED_ADMIN_KEY="$PROOF_VEHICLE_ADMIN_KEY" npx convex run
+ * proofVehicle/fixture:reset '{}'` (requires `PROOF_VEHICLE_FIXTURE=1`
+ * on that deployment; the same URL/key binding matters here too
  * -- a bare `npx convex run` targets the CLI's default dev deployment, not
  * necessarily the one this loader just checked) or point at a fresh
  * deployment -- do not just set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to skip
@@ -65,15 +65,28 @@
  * literal ID tie -- is the snapshot reference run (U11).
  */
 
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConvexHttpClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
-import type { BaseOp } from "../convex/proofVehicle/fixture";
+import type { BaseOp, Phase } from "../convex/proofVehicle/basePlan";
+import { groupOpsByPhase, naturalKey as sharedNaturalKey } from "../convex/proofVehicle/basePlan";
 
+// Toolchain note: typescript@5.0's lib predates Promise.withResolvers
+// (runtime Node here is v22+). Declare the shape locally rather than
+// restructuring around a `new Promise` executor.
+declare global {
+	interface PromiseConstructor {
+		withResolvers<T>(): {
+			promise: Promise<T>;
+			resolve: (value: T | PromiseLike<T>) => void;
+			reject: (reason?: unknown) => void;
+		};
+	}
+}
 const EPOCH_BASE_MS = Date.parse("2026-01-01T00:00:00Z");
 
 /**
@@ -85,33 +98,15 @@ export function legacyMessagesPresent(messageRows: readonly Record<string, unkno
 	return messageRows.some((row) => !("room" in row) || row["room"] === undefined);
 }
 
-type Phase = { table: "rooms" | "users" | "memberships" | "messages" | "likes"; ops: BaseOp[] };
-
-/** Splits a vector's base ops into the four sequential import phases KTD5 specifies. */
+/** Splits a vector's base ops into the sequential import phases KTD5 specifies. */
 export function planImportPhases(ops: readonly BaseOp[]): Phase[] {
-	const byTable: Record<Phase["table"], BaseOp[]> = {
-		rooms: [],
-		users: [],
-		memberships: [],
-		messages: [],
-		likes: [],
-	};
-	for (const op of ops) {
-		if (op.op === "insertRoom") byTable.rooms.push(op);
-		else if (op.op === "insertUser") byTable.users.push(op);
-		else if (op.op === "insertMembership") byTable.memberships.push(op);
-		else if (op.op === "insertMessage") byTable.messages.push(op);
-		else if (op.op === "insertLike") byTable.likes.push(op);
-	}
+	// The phase order and message ordering are the shared loading plan
+	// (`basePlan.groupOpsByPhase`), the same one convex-test's
+	// `loadBaseIntoConvexTest` executes: one definition, two pipelines.
 	// Messages import in ascending creationTime order so the epoch-offset
 	// timestamps this file assigns land in the corpus's own relative order
-	// (ties, like V4's m50/m51, get equal offsets -- see buildRows).
-	byTable.messages.sort((a, b) =>
-		a.op === "insertMessage" && b.op === "insertMessage" ? a.creationTime - b.creationTime : 0,
-	);
-	return (["rooms", "users", "memberships", "messages", "likes"] as const)
-		.map((table) => ({ table, ops: byTable[table] }))
-		.filter((phase) => phase.ops.length > 0);
+	// (ties, like V4's m50/m51, get equal offsets -- see buildImportRows).
+	return groupOpsByPhase(ops).filter((phase) => phase.ops.length > 0);
 }
 
 /**
@@ -156,11 +151,12 @@ export function buildImportRows(
 
 /**
  * Self-hosted import target (I2d/KTD5): the deployment's URL and admin
- * key, used for both reads (ConvexHttpClient) and every
- * `npx convex import`. The explicit `--url`/`--admin-key` path writes
- * CONVEX_URL but removes CONVEX_DEPLOYMENT, and the Convex CLI does not
- * allow `--deployment` with self-hosted credentials -- so imports carry
- * the same URL and key instead of a deployment name.
+ * key, used for reads (ConvexHttpClient) and -- via `importEnv` -- for
+ * every `npx convex import` child's environment. The explicit child env
+ * carries CONVEX_SELF_HOSTED_URL/CONVEX_SELF_HOSTED_ADMIN_KEY but removes
+ * CONVEX_DEPLOYMENT, and the Convex CLI does not allow `--deployment`
+ * with self-hosted credentials -- so imports resolve the same deployment
+ * reads use, never the CLI's default dev deployment.
  */
 export type ImportTarget = { url: string; adminKey: string };
 
@@ -188,49 +184,105 @@ export function resolveImportTarget(env: NodeJS.ProcessEnv): ImportTarget {
 
 /**
  * Builds one `npx convex import` argv (without the leading `npx`) for a
- * phase file. Extracted so the self-hosted flag shape is unit-testable
- * without a live deployment -- the subprocess call itself cannot be.
+ * phase file. The deployment binding travels in the child environment
+ * (see `importEnv`), never in argv: `--admin-key` on the command line is
+ * visible to any local process-list reader for the import's duration, and
+ * Node embeds the full argv in exec-failure messages that land in logs.
+ * Extracted so the flag shape is unit-testable without a live deployment
+ * -- the subprocess call itself cannot be.
  */
-export function importArgs(
-	table: string,
-	file: string,
-	replace: boolean,
-	target: ImportTarget,
-): string[] {
-	const args = [
-		"convex",
-		"import",
-		"--url",
-		target.url,
-		"--admin-key",
-		target.adminKey,
-		"--table",
-		table,
-		"--yes",
-	];
+export function importArgs(table: string, file: string, replace: boolean): string[] {
+	const args = ["convex", "import", "--table", table, "--yes"];
 	if (replace) args.push("--replace");
 	args.push(file);
 	return args;
 }
 
-function runConvexImport(
+/**
+ * Explicit child-process environment for one `npx convex import`: the
+ * self-hosted URL and admin key ride as `CONVEX_SELF_HOSTED_URL` /
+ * `CONVEX_SELF_HOSTED_ADMIN_KEY` (the Convex CLI's documented env
+ * alternative to `--url`/`--admin-key`), and `CONVEX_DEPLOYMENT` is
+ * removed so the CLI cannot resolve a different deployment than the
+ * reads use. Takes the parent env as its base so PATH and friends
+ * survive; callers pass a stub env in tests.
+ */
+export function importEnv(
+	target: ImportTarget,
+	baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {
+		...baseEnv,
+		CONVEX_SELF_HOSTED_URL: target.url,
+		CONVEX_SELF_HOSTED_ADMIN_KEY: target.adminKey,
+	};
+	delete env["CONVEX_DEPLOYMENT"];
+	return env;
+}
+
+/** Strips the admin key from text about to hit stderr/CI logs. */
+export function redactSecrets(message: string, target: ImportTarget): string {
+	return message.split(target.adminKey).join("[redacted-admin-key]");
+}
+
+async function runConvexImport(
 	table: string,
 	rows: Record<string, unknown>[],
 	replace: boolean,
 	target: ImportTarget,
-): void {
+): Promise<void> {
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
 	const file = join(dir, `${table}.jsonl`);
-	writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
 	try {
-		const args = importArgs(table, file, replace, target);
-		// A stalled subprocess (network partition, stalled npx resolution,
-		// an interactive prompt this non-interactive caller can't answer)
-		// must not block the loader indefinitely: time out after 120s.
-		execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
+		writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+		const args = importArgs(table, file, replace);
+		await runImportChild(args, importEnv(target), table);
+	} catch (error) {
+		throw new Error(
+			redactSecrets(error instanceof Error ? error.message : String(error), target),
+		);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Runs one `npx convex import` child with a 120s watchdog. A stalled
+ * subprocess (network partition, stalled npx resolution, an interactive
+ * prompt this non-interactive caller can't answer) must not block the
+ * loader indefinitely -- and the watchdog must kill the whole process
+ * tree, not just the direct `npx` shim: npm launches the real `convex`
+ * CLI as a grandchild that would otherwise survive the timeout and keep
+ * writing underneath a retry. `detached` makes the child a process-group
+ * leader (POSIX) so a negative-pid SIGKILL takes the group with it.
+ */
+function runImportChild(args: string[], env: NodeJS.ProcessEnv, table: string): Promise<void> {
+	const { promise: done, resolve, reject } = Promise.withResolvers<void>();
+	const child = spawn("npx", args, {
+		stdio: "inherit",
+		env,
+		detached: process.platform !== "win32",
+	});
+	const timer = setTimeout(() => {
+		if (process.platform !== "win32" && child.pid !== undefined) {
+			try {
+				process.kill(-child.pid, "SIGKILL");
+			} catch {
+				// Group already gone; the exit handler below settles this.
+			}
+		}
+		reject(new Error(`convex import timed out after 120s for ${table}`));
+	}, 120_000);
+	child.on("error", (error) => {
+		clearTimeout(timer);
+		reject(error);
+	});
+	child.on("exit", (code, signal) => {
+		clearTimeout(timer);
+		if (code === 0) resolve();
+		else reject(new Error(`convex import ${signal ?? `exited ${code}`} for ${table}`));
+	});
+	return done;
 }
 
 /**
@@ -241,35 +293,58 @@ function runConvexImport(
  * contract guarantees at most one membership per (room, user); no corpus
  * vector's *base* state repeats a (message, user) like pair, even though
  * V6's delta later adds a second one via a mutation call that returns its
- * own id directly, needing no read-back).
+ * own id directly, needing no read-back). Field layout comes from the
+ * shared table (`basePlan.naturalKey`); this wrapper only resolves op
+ * labels to ids first.
  */
 export function naturalKey(op: BaseOp, idByLabel: ReadonlyMap<string, string>): string {
 	const resolve = (label: string) => idByLabel.get(label) ?? label;
 	switch (op.op) {
 		case "insertRoom":
+			return sharedNaturalKey("rooms", () => op.name);
 		case "insertUser":
-			return op.name;
+			return sharedNaturalKey("users", () => op.name);
 		case "insertMessage":
-			return op.body;
+			return sharedNaturalKey("messages", () => op.body);
 		case "insertMembership":
-			return `${resolve(op.room)}/${resolve(op.user)}`;
+			return sharedNaturalKey("memberships", (field) =>
+				resolve(field === "room" ? op.room : op.user),
+			);
 		case "insertLike":
-			return `${resolve(op.message)}/${resolve(op.user)}`;
+			return sharedNaturalKey("likes", (field) =>
+				resolve(field === "message" ? op.message : op.user),
+			);
 	}
 }
 
 function rowNaturalKey(table: Phase["table"], row: Record<string, unknown>): string {
-	switch (table) {
-		case "rooms":
-		case "users":
-			return String(row["name"]);
-		case "messages":
-			return String(row["body"]);
-		case "memberships":
-			return `${String(row["room"])}/${String(row["user"])}`;
-		case "likes":
-			return `${String(row["message"])}/${String(row["user"])}`;
+	return sharedNaturalKey(table, (field) => String(row[field]));
+}
+
+/**
+ * Indexes one phase's read-back rows by natural key, failing loudly on a
+ * duplicate: without this, two rows sharing a name/body silently collapse
+ * in the Map and every label bound afterwards can point at the wrong row.
+ * Extracted pure so the corpus-lint companion (uniqueness of *base* ops)
+ * has a runtime twin for what the deployment actually returns.
+ */
+export function indexRowsByNaturalKey(
+	table: Phase["table"],
+	rows: readonly (Record<string, unknown> & { _id: string })[],
+): Map<string, string> {
+	const idByNaturalKey = new Map<string, string>();
+	for (const row of rows) {
+		const key = rowNaturalKey(table, row);
+		const clash = idByNaturalKey.get(key);
+		if (clash !== undefined) {
+			throw new Error(
+				`readBackLabels: duplicate ${table} rows share natural key "${key}" (${clash}, ${row._id}); ` +
+					"labels cannot bind unambiguously",
+			);
+		}
+		idByNaturalKey.set(key, row._id);
 	}
+	return idByNaturalKey;
 }
 
 async function readBackLabels(
@@ -282,8 +357,12 @@ async function readBackLabels(
 		Record<string, never>,
 		({ _id: string } & Record<string, unknown>)[]
 	>(`proofVehicle/tables:${phase.table}`);
-	const rows = await client.query(ref, {});
-	const idByNaturalKey = new Map(rows.map((row) => [rowNaturalKey(phase.table, row), row._id]));
+	const rows = await withDeadline(
+		client.query(ref, {}),
+		60_000,
+		`readBackLabels(${phase.table})`,
+	);
+	const idByNaturalKey = indexRowsByNaturalKey(phase.table, rows);
 	const resolved = new Map<string, string>();
 	for (const op of phase.ops) {
 		const key = naturalKey(op, idByLabel);
@@ -316,6 +395,29 @@ export function computeNonEmptyTables(tables: {
 	);
 }
 
+/**
+ * Races a deployment read against a fixed clock: a hung backend must fail
+ * this loader loudly (naming the read) instead of hanging the CLI forever.
+ * Settles the timer on either outcome, so a resolved read leaves nothing
+ * behind; a read that rejects after the timeout already fired settles
+ * nothing further, avoiding unhandled rejections.
+ */
+export function withDeadline<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+	const { promise: gated, resolve, reject } = Promise.withResolvers<T>();
+	const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+	promise.then(
+		(value) => {
+			clearTimeout(timer);
+			resolve(value);
+		},
+		(err) => {
+			clearTimeout(timer);
+			reject(err);
+		},
+	);
+	return gated;
+}
+
 async function main(): Promise<void> {
 	const vectorId = process.argv[2];
 	if (vectorId === undefined || !(vectorId in corpus.vectors)) {
@@ -338,11 +440,15 @@ async function main(): Promise<void> {
 	const url = target.url;
 	const client = new ConvexHttpClient(url);
 
-	const existingMessages = await client.query(
-		makeFunctionReference<"query", Record<string, never>, Record<string, unknown>[]>(
-			"proofVehicle/tables:messages",
+	const existingMessages = await withDeadline(
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, Record<string, unknown>[]>(
+				"proofVehicle/tables:messages",
+			),
+			{},
 		),
-		{},
+		60_000,
+		"tables:messages legacy-row preflight",
 	);
 	if (legacyMessagesPresent(existingMessages)) {
 		throw new Error(
@@ -369,23 +475,43 @@ async function main(): Promise<void> {
 		// Independent preflight reads: fetch concurrently, then apply the
 		// same guard predicate to the same keyed inputs.
 		const [rooms, users, memberships, likes] = await Promise.all([
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:rooms"),
-				{},
-			),
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:users"),
-				{},
-			),
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>(
-					"proofVehicle/tables:memberships",
+			withDeadline(
+				client.query(
+					makeFunctionReference<"query", Record<string, never>, unknown[]>(
+						"proofVehicle/tables:rooms",
+					),
+					{},
 				),
-				{},
+				60_000,
+				"tables:rooms emptiness preflight",
 			),
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
-				{},
+			withDeadline(
+				client.query(
+					makeFunctionReference<"query", Record<string, never>, unknown[]>(
+						"proofVehicle/tables:users",
+					),
+					{},
+				),
+				60_000,
+				"tables:users emptiness preflight",
+			),
+			withDeadline(
+				client.query(
+					makeFunctionReference<"query", Record<string, never>, unknown[]>(
+						"proofVehicle/tables:memberships",
+					),
+					{},
+				),
+				60_000,
+				"tables:memberships emptiness preflight",
+			),
+			withDeadline(
+				client.query(
+					makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
+					{},
+				),
+				60_000,
+				"tables:likes emptiness preflight",
 			),
 		]);
 		const nonEmptyTables = computeNonEmptyTables({
@@ -427,11 +553,15 @@ async function main(): Promise<void> {
 		// the window from "the whole script's runtime" to "between this
 		// check and the next subprocess call".
 		if (replace && process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
-			const rows = await client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>(
-					`proofVehicle/tables:${phase.table}`,
+			const rows = await withDeadline(
+				client.query(
+					makeFunctionReference<"query", Record<string, never>, unknown[]>(
+						`proofVehicle/tables:${phase.table}`,
+					),
+					{},
 				),
-				{},
+				60_000,
+				`tables:${phase.table} pre-replace recheck`,
 			);
 			if (rows.length > 0) {
 				throw new Error(
@@ -442,7 +572,7 @@ async function main(): Promise<void> {
 			}
 		}
 		const rows = buildImportRows(phase, idByLabel);
-		runConvexImport(phase.table, rows, replace, target);
+		await runConvexImport(phase.table, rows, replace, target);
 		for (const [label, id] of await readBackLabels(client, phase, idByLabel)) {
 			idByLabel.set(label, id);
 		}
