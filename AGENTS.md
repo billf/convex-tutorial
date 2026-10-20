@@ -71,7 +71,9 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
     has an active membership in it (so demo/test chat traffic populates
     demo/test memberships and stays visible to the proof-vehicle oracle
     below, matching production-shaped traffic's behavior), then inserts a
-    message tied to that room and the given user id.
+    message tied to that room and the given user id. It throws on a
+    dangling sender id (fail-closed, like the proof-vehicle mutations)
+    instead of writing an orphan membership/message.
   - `getMessages` (query) — reads the latest 50 messages in the default
     room and resolves each message's sender name server-side (batched by
     unique user id, not a per-row lookup) so the client never needs its

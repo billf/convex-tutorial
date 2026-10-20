@@ -67,6 +67,15 @@ export const sendMessage = mutation({
 	},
 	returns: v.null(),
 	handler: async (ctx, args) => {
+		// Fail closed on a dangling sender (deleted user, stale tab id):
+		// validate before writing anything, so a bad call creates neither
+		// a room, a membership, nor a message. Matches the proof-vehicle
+		// mutations' convention (addLike / membershipAndLikesTxn throw on
+		// dangling targets instead of writing orphans).
+		const sender = await ctx.db.get("users", args.user);
+		if (sender === null) {
+			throw new Error("sendMessage: user does not exist");
+		}
 		const room = await getOrCreateDefaultRoom(ctx);
 		await ensureActiveMembership(ctx, room, args.user);
 		await ctx.db.insert("messages", {
