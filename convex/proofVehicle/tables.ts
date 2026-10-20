@@ -1,11 +1,7 @@
-/**
- * Q13's monolithic baselines and plain per-table reads (docs/plans/
- * 2026-09-11-1159-feat-skip-shared-prerequisites-plan.md, U4).
- */
-
 import { query } from "../_generated/server";
 import { v } from "convex/values";
 import schema from "../schema";
+import { pickMarkerRow } from "./fixture";
 
 export const rooms = query({
 	args: {},
@@ -40,16 +36,18 @@ export const likes = query({
 /**
  * The harness-only marker sequence row (KTD4), for separate-session
  * sources that cannot read a mutation's own commit timestamp. `null`
- * before `proofVehicle/fixture:marker` first runs. Reads the most recent
- * row rather than asserting exactly one so a leftover/double-run marker
- * degrades to "latest" instead of throwing.
+ * before `proofVehicle/fixture:marker` first runs. Resolves "latest" with
+ * the shared `pickMarkerRow` (highest sequence) so a leftover/double-run
+ * duplicate degrades to the same row `bumpMarker` would advance instead
+ * of throwing. The markers table holds one row in practice; the collect
+ * below scans at most the leftover duplicates.
  */
 export const markers = query({
 	args: {},
 	returns: v.union(v.null(), schema.doc("proofVehicleMarkers")),
 	handler: async (ctx) => {
-		const rows = await ctx.db.query("proofVehicleMarkers").order("desc").take(1);
-		return rows[0] ?? null;
+		const rows = await ctx.db.query("proofVehicleMarkers").collect();
+		return pickMarkerRow(rows) ?? null;
 	},
 });
 

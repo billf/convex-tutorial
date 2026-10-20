@@ -7,7 +7,7 @@ import schema from "./schema";
 // KTD8: messages moved from {user, body} to {room, sender, body}.
 // sendMessage lazily creates this default room so the client's
 // {user, body} call shape (src/App.tsx) needs no change.
-const DEFAULT_ROOM_NAME = "general";
+export const DEFAULT_ROOM_NAME = "general";
 
 /**
  * by_name has no uniqueness guarantee, so two racing sendMessage calls that
@@ -31,7 +31,16 @@ async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
 	if (existing !== undefined) {
 		return existing._id;
 	}
-	return await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
+	await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
+	// A racing writer may have inserted a duplicate "general" room in the
+	// same window; re-resolve so every creator converges on the oldest row
+	// and subsequent messages land in one room. A transaction always reads
+	// its own writes, so the row just inserted is visible here at minimum.
+	const converged = await findDefaultRoom(ctx);
+	if (converged === undefined) {
+		throw new Error("getOrCreateDefaultRoom: just-inserted default room not found");
+	}
+	return converged._id;
 }
 
 /**

@@ -9,17 +9,48 @@
 import { internalMutation, mutation } from "../_generated/server";
 import { v } from "convex/values";
 import type { MutationCtx } from "../_generated/server";
-import type { Id, TableNames } from "../_generated/dataModel";
+import type { Doc, Id, TableNames } from "../_generated/dataModel";
+
+/**
+ * Latest marker row: highest sequence, breaking ties by latest creation.
+ * Shared by the `tables:markers` read path and `bumpMarker` below so the
+ * two definitions of "latest" cannot drift apart.
+ */
+export function pickMarkerRow(
+	rows: Doc<"proofVehicleMarkers">[],
+): Doc<"proofVehicleMarkers"> | undefined {
+	let latest: Doc<"proofVehicleMarkers"> | undefined;
+	for (const row of rows) {
+		if (
+			latest === undefined ||
+			row.sequence > latest.sequence ||
+			(row.sequence === latest.sequence && row._creationTime > latest._creationTime)
+		) {
+			latest = row;
+		}
+	}
+	return latest;
+}
 
 /** Bumps the single `proofVehicleMarkers` row, creating it on first use. */
 export async function bumpMarker(ctx: MutationCtx): Promise<number> {
-	const existing = await ctx.db.query("proofVehicleMarkers").unique();
-	if (existing === null) {
+	// The markers read path tolerates duplicate rows (leftover/double-run),
+	// so the write path must too: a `.unique()` here would brick every
+	// harness mutation in exactly the state `tables:markers` accepts.
+	const rows = await ctx.db.query("proofVehicleMarkers").collect();
+	const latest = pickMarkerRow(rows);
+	if (latest === undefined) {
 		await ctx.db.insert("proofVehicleMarkers", { sequence: 1 });
 		return 1;
 	}
-	const sequence = existing.sequence + 1;
-	await ctx.db.patch("proofVehicleMarkers", existing._id, { sequence });
+	const sequence = latest.sequence + 1;
+	await ctx.db.patch("proofVehicleMarkers", latest._id, { sequence });
+	// Self-heal: drop the duplicates so the next bump sees one row again.
+	for (const row of rows) {
+		if (row._id !== latest._id) {
+			await ctx.db.delete("proofVehicleMarkers", row._id);
+		}
+	}
 	return sequence;
 }
 
@@ -49,6 +80,12 @@ const PROOF_VEHICLE_TABLES = [
  * contract tables plus the harness-only marker table). Refuses to run
  * unless the deployment env var `PROOF_VEHICLE_FIXTURE` is exactly `"1"`.
  *
+ * Blast radius is the LIVE shared tables, not a harness namespace:
+ * rooms/users/memberships/messages are the same tables the tutorial chat
+ * app reads and writes, so a correctly-bound reset against the wrong
+ * (e.g. `npm run dev`) deployment destroys real chat data. Set the flag
+ * only on disposable deployments, and only for the duration of the load.
+ *
  * Review finding #3 (2026-09-28): internal, not public -- the
  * `PROOF_VEHICLE_FIXTURE` guard alone let any connected client wipe every
  * proof-vehicle table on a deployment with the flag set. `npx convex run`
@@ -63,7 +100,7 @@ export const reset = internalMutation({
 	handler: async (ctx) => {
 		if (process.env.PROOF_VEHICLE_FIXTURE !== "1") {
 			throw new Error(
-				'proofVehicle/fixture:reset refused: set the deployment env var PROOF_VEHICLE_FIXTURE to "1" first (npx convex env set PROOF_VEHICLE_FIXTURE 1).',
+				'proofVehicle/fixture:reset refused: set the deployment env var PROOF_VEHICLE_FIXTURE to "1" first (with CONVEX_SELF_HOSTED_URL/CONVEX_SELF_HOSTED_ADMIN_KEY exported for that deployment, run: npx convex env set PROOF_VEHICLE_FIXTURE 1 -- a bare `npx convex env set` without that pair targets the CLI default dev deployment, not necessarily this one).',
 			);
 		}
 		for (const table of PROOF_VEHICLE_TABLES) {
@@ -210,7 +247,8 @@ export type TableParity = { count: number; contentHash: string };
  * checked by the boundary/order tests), rows are sorted by their mapped
  * `_id` for order-independence, and the result is JSON with sorted object
  * keys, hashed with SHA-256. Reproduced by Q's U8 parity function against
- * `corpus/v1.parity.json` / `testdata/v1.parity.json`.
+ * `corpus/v1.parity.json` / `testdata/v1.parity.json` -- keep them in sync
+ * if this mapping changes.
  */
 export async function computeParity(
 	rows: readonly Record<string, unknown>[],
@@ -219,7 +257,14 @@ export async function computeParity(
 	const ID_LIKE_FIELDS = new Set(["_id", "room", "user", "sender", "message"]);
 	const mapValue = (key: string, value: unknown): unknown => {
 		if (ID_LIKE_FIELDS.has(key) && typeof value === "string") {
-			return labelByRawId.get(value) ?? value;
+			const label = labelByRawId.get(value);
+			if (label === undefined) {
+				throw new Error(
+					`computeParity: id-like field "${key}" has no bound corpus label; ` +
+						"label every loaded row and delta-created row before hashing.",
+				);
+			}
+			return label;
 		}
 		return value;
 	};

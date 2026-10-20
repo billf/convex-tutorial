@@ -1272,7 +1272,7 @@
 					"likeCount": 0
 				}
 			],
-			"note": "m51 and m50 share creationTime 51 (the ID tie); convex-test cannot force an exact tie via the public insert API (see the plan Assumptions), so proofVehicle.test.ts checks the *set* of included IDs here and defers the literal tie-break order to the snapshot reference run (U11).",
+			"note": "m51 and m50 share creationTime 51 (the ID tie); convex-test cannot force an exact tie via the public insert API (see the plan Assumptions), so proofVehicle.test.ts checks the *set* of included IDs here. The m51-before-m50 expectedBase order above is one valid outcome, not the required one: Convex assigns real IDs randomly, so the tied pair's relative order on a deployment is nondeterministic and the snapshot reference run (U11) must compare ties as sets too.",
 			"deltas": [],
 			"expectedAfterDelta": []
 		},
