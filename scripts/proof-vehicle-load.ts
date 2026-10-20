@@ -24,17 +24,27 @@
  *
  * Requires CONVEX_URL and PROOF_VEHICLE_ADMIN_KEY in this process's
  * environment (`tsx` does not load `.env.local` automatically): the URL
- * names the self-hosted deployment for reads, and the same URL plus key
- * are passed explicitly to every `npx convex import` (no `--deployment`
- * -- the Convex CLI does not allow it with self-hosted credentials), so
- * writes cannot silently default to a different deployment than reads
- * use. Also requires PROOF_VEHICLE_FIXTURE=1 set on that deployment if a
- * delta calls `fixture:reset` -- set it with the same --url/--admin-key
- * binding as every import here, e.g.
- * `npx convex env set PROOF_VEHICLE_FIXTURE 1 --url "$CONVEX_URL"
- * --admin-key "$PROOF_VEHICLE_ADMIN_KEY"`. A bare `npx convex env set`
- * (no --url/--admin-key) targets the CLI's own default dev deployment
- * instead, which can silently differ from CONVEX_URL.
+ * names the self-hosted deployment for reads, and each `npx convex import`
+ * child receives the same URL plus key via its environment (never on argv;
+ * see the key-hygiene note below; no `--deployment` -- the Convex CLI does
+ * not allow it with self-hosted credentials), so writes cannot silently
+ * default to a different deployment than reads use. Also requires
+ * delta calls `fixture:reset` -- set it via the same self-hosted env pair
+ * the imports use: with `CONVEX_SELF_HOSTED_URL="$CONVEX_URL"` and
+ * `CONVEX_SELF_HOSTED_ADMIN_KEY` exported (see the key-hygiene note
+ * below), run `npx convex env set PROOF_VEHICLE_FIXTURE 1` with no flags.
+ * A bare `npx convex env set` without that pair targets the CLI's own
+ * default dev deployment instead, which can silently differ from CONVEX_URL.
+ *
+ * Key hygiene: each import child receives the admin key via its
+ * environment (`CONVEX_SELF_HOSTED_ADMIN_KEY`), never on argv -- so the
+ * key is invisible to `ps` and never lands in shell history from the
+ * loader's own commands. Same-user environ reads (`/proc/<pid>/environ`)
+ * can still see it during the seconds an import runs: treat a load host
+ * as single-operator for its duration. The operator-typed commands in
+ * this header authenticate the same way (env pair, no flags): export the
+ * pair per session from a 0600 file or `read -s`, never paste the key
+ * into tickets, chat, or an inline `VAR=value` command prefix.
  *
  * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
  * import with `--replace`, which clears those tables entirely -- and
@@ -42,14 +52,13 @@
  * tables. This loader refuses to run against any deployment where
  * rooms/users/memberships/messages/likes already has rows (a `npm run dev`
  * deployment always does, from its first chat message onward). Reset first
- * with `npx convex run proofVehicle/fixture:reset '{}' --url "$CONVEX_URL"
- * --admin-key "$PROOF_VEHICLE_ADMIN_KEY"` (requires `PROOF_VEHICLE_FIXTURE=1`
- * on that deployment; the same --url/--admin-key binding matters here too
- * -- a bare `npx convex run` targets the CLI's default dev deployment, not
+ * with `npx convex run proofVehicle/fixture:reset '{}'` under the same
+ * env pair (no flags)` (requires `PROOF_VEHICLE_FIXTURE=1`
+ * on that deployment; the same env-pair binding matters here too -- a bare
+ * `npx convex run` without it targets the CLI's default dev deployment, not
  * necessarily the one this loader just checked) or point at a fresh
- * deployment -- do not just set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to skip
- * the check; on a nonempty target that still replaces rooms/users and can
- * still leave a partial import (see the error text this throws for why).
+ * deployment -- the guard has no override flag, so a stale bypass cannot
+ * linger into a later run against a live deployment.
  *
  * The emptiness check is point-in-time (once before the run, and again
  * immediately before each --replace phase) with no lock held across the
@@ -85,7 +94,7 @@ export function legacyMessagesPresent(messageRows: readonly Record<string, unkno
 	return messageRows.some((row) => !("room" in row) || row["room"] === undefined);
 }
 
-type Phase = { table: "rooms" | "users" | "memberships" | "messages" | "likes"; ops: BaseOp[] };
+export type Phase = { table: "rooms" | "users" | "memberships" | "messages" | "likes"; ops: BaseOp[] };
 
 /** Splits a vector's base ops into the five sequential import phases KTD5 specifies. */
 export function planImportPhases(ops: readonly BaseOp[]): Phase[] {
@@ -156,11 +165,11 @@ export function buildImportRows(
 
 /**
  * Self-hosted import target (I2d/KTD5): the deployment's URL and admin
- * key, used for both reads (ConvexHttpClient) and every
- * `npx convex import`. The explicit `--url`/`--admin-key` path writes
- * CONVEX_URL but removes CONVEX_DEPLOYMENT, and the Convex CLI does not
- * allow `--deployment` with self-hosted credentials -- so imports carry
- * the same URL and key instead of a deployment name.
+ * key, used for reads (ConvexHttpClient) and for each `npx convex import`
+ * child's environment (see `childEnvForImport`). The explicit flag-based
+ * path writes CONVEX_URL but removes CONVEX_DEPLOYMENT, and the Convex CLI
+ * does not allow `--deployment` with self-hosted credentials -- so imports
+ * carry the same URL and key instead of a deployment name.
  */
 export type ImportTarget = { url: string; adminKey: string };
 
@@ -188,33 +197,70 @@ export function resolveImportTarget(env: NodeJS.ProcessEnv): ImportTarget {
 
 /**
  * Builds one `npx convex import` argv (without the leading `npx`) for a
- * phase file. Extracted so the self-hosted flag shape is unit-testable
- * without a live deployment -- the subprocess call itself cannot be.
+ * phase file. Carries no credentials: the target URL and admin key reach
+ * the child via `childEnvForImport` instead of argv, so neither `ps` nor
+ * the failure error text (see `sanitizedImportError`) can leak the key.
+ * Extracted so the flag shape stays unit-testable without a live
+ * deployment -- the subprocess call itself cannot be.
  */
-export function importArgs(
-	table: string,
-	file: string,
-	replace: boolean,
-	target: ImportTarget,
-): string[] {
-	const args = [
-		"convex",
-		"import",
-		"--url",
-		target.url,
-		"--admin-key",
-		target.adminKey,
-		"--table",
-		table,
-		"--yes",
-	];
+export function importArgs(table: Phase["table"], file: string, replace: boolean): string[] {
+	const args = ["convex", "import", "--table", table, "--yes"];
 	if (replace) args.push("--replace");
 	args.push(file);
 	return args;
 }
 
+/**
+ * Environment for one `npx convex import` child: the self-hosted pair the
+ * Convex CLI resolves when no deployment-selection flags are present.
+ * Project credential vars are stripped so a stale operator
+ * export (e.g. a `CONVEX_DEPLOYMENT` left over from hosted work) cannot
+ * divert the import or crash selection next to the self-hosted pair.
+ */
+export function childEnvForImport(
+	target: ImportTarget,
+	env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+	const {
+		CONVEX_DEPLOYMENT: _deployment,
+		CONVEX_DEPLOY_KEY: _key,
+		CONVEX_DEPLOYMENT_TOKEN: _token,
+		...rest
+	} = env;
+	return {
+		...rest,
+		CONVEX_SELF_HOSTED_URL: target.url,
+		CONVEX_SELF_HOSTED_ADMIN_KEY: target.adminKey,
+	};
+}
+
+/**
+ * Rewrites a failed `execFileSync` import error without the secret: Node
+ * renders the full child argv (including any admin-key value) into the
+ * thrown error's message, and the entrypoint logs whatever it catches --
+ * so the raw error must never reach `console.error`.
+ */
+export function sanitizedImportError(table: Phase["table"], error: unknown): Error {
+	let outcome = "status unknown";
+	if (typeof error === "object" && error !== null) {
+		if ("signal" in error && error.signal !== null && error.signal !== undefined) {
+			outcome = `signal ${String(error.signal)}`;
+		} else if ("status" in error) {
+			outcome = `status ${String(error.status)}`;
+		}
+	}
+	return new Error(
+		`convex import --table ${table} failed (${outcome}); ` +
+			"the failing command and admin key are intentionally omitted here. " +
+			"Prior phases may have left partial data and the nonempty-target guard " +
+			"refuses a bare rerun: run `proofVehicle/fixture:reset` " +
+			"(`PROOF_VEHICLE_FIXTURE=1` on that deployment) or use a fresh " +
+			"deployment, then rerun the loader from the start.",
+	);
+}
+
 function runConvexImport(
-	table: string,
+	table: Phase["table"],
 	rows: Record<string, unknown>[],
 	replace: boolean,
 	target: ImportTarget,
@@ -222,12 +268,19 @@ function runConvexImport(
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
 	const file = join(dir, `${table}.jsonl`);
 	writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+	const args = importArgs(table, file, replace);
 	try {
-		const args = importArgs(table, file, replace, target);
 		// A stalled subprocess (network partition, stalled npx resolution,
 		// an interactive prompt this non-interactive caller can't answer)
 		// must not block the loader indefinitely: time out after 120s.
-		execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
+		execFileSync("npx", args, {
+			stdio: "inherit",
+			timeout: 120_000,
+			killSignal: "SIGKILL",
+			env: childEnvForImport(target),
+		});
+	} catch (error) {
+		throw sanitizedImportError(table, error);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -299,7 +352,7 @@ async function readBackLabels(
 }
 
 /**
- * Pure predicate behind the pre-import empty-target guard (M2 / BR1): which
+ * Pure predicate behind the pre-import empty-target guard: which
  * of the five proof-vehicle tables already have rows. Extracted so the
  * guard's actual decision logic is unit-testable without a live deployment
  * -- the query calls that produce its input cannot be.
@@ -363,52 +416,49 @@ async function main(): Promise<void> {
 	// user -- makes that scenario fail loudly instead of silently, without
 	// requiring the loader to know which rows are "its own" (KTD8's schema
 	// has no proof-vehicle-specific ownership marker to scope a narrower
-	// delete by). Bypass: PROOF_VEHICLE_ALLOW_NONEMPTY=1, for a deployment
-	// the operator has explicitly decided is disposable.
-	if (process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
-		// Independent preflight reads: fetch concurrently, then apply the
-		// same guard predicate to the same keyed inputs.
-		const [rooms, users, memberships, likes] = await Promise.all([
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:rooms"),
-				{},
+	// delete by). There is deliberately no bypass: a stale
+	// PROOF_VEHICLE_ALLOW_NONEMPTY-style override retained from a disposable
+	// load could otherwise skip this guard after CONVEX_URL is repointed at
+	// a live deployment. To load onto a nonempty deployment, run
+	// `proofVehicle/fixture:reset` first (it refuses without
+	// PROOF_VEHICLE_FIXTURE=1 on that deployment) or use a fresh one.
+	// Independent preflight reads: fetch concurrently, then apply the
+	// same guard predicate to the same keyed inputs.
+	const [rooms, users, memberships, likes] = await Promise.all([
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:rooms"),
+			{},
+		),
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:users"),
+			{},
+		),
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, unknown[]>(
+				"proofVehicle/tables:memberships",
 			),
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:users"),
-				{},
-			),
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>(
-					"proofVehicle/tables:memberships",
-				),
-				{},
-			),
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
-				{},
-			),
-		]);
-		const nonEmptyTables = computeNonEmptyTables({
-			rooms,
-			users,
-			memberships,
-			likes,
-			messages: existingMessages,
-		});
-		if (nonEmptyTables.length > 0) {
-			throw new Error(
-				`non-empty-target: this deployment already has rows in [${nonEmptyTables.join(", ")}]. ` +
-					"Running this loader here would either replace live rooms/users data (if this is the " +
-					"deployment `npm run dev` uses) or leave a partial import (--replace on rooms/users " +
-					"only, requireEmpty on the rest). Use a fresh/disposable deployment, or run " +
-					"`proofVehicle/fixture:reset` first and re-run. PROOF_VEHICLE_ALLOW_NONEMPTY=1 skips " +
-					"this check entirely -- it is NOT a safe alternative to reset: on a nonempty target it " +
-					"still replaces rooms/users and can still hit requireEmpty rejections on " +
-					"memberships/messages/likes, leaving fresh rooms/users IDs with stale rows pointing at " +
-					"the old (now-deleted) ones. Only set it on a deployment you have separately verified " +
-					"is safe to lose all proof-vehicle-table data on, and prefer reset first regardless.",
-			);
-		}
+			{},
+		),
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
+			{},
+		),
+	]);
+	const nonEmptyTables = computeNonEmptyTables({
+		rooms,
+		users,
+		memberships,
+		likes,
+		messages: existingMessages,
+	});
+	if (nonEmptyTables.length > 0) {
+		throw new Error(
+			`non-empty-target: this deployment already has rows in [${nonEmptyTables.join(", ")}]. ` +
+				"Running this loader here would either replace live rooms/users data (if this is the " +
+				"deployment `npm run dev` uses) or leave a partial import (--replace on rooms/users " +
+				"only, requireEmpty on the rest). Use a fresh/disposable deployment, or run " +
+				"`proofVehicle/fixture:reset` first and re-run.",
+		);
 	}
 
 	const vector = corpus.vectors[vectorId as keyof typeof corpus.vectors];
@@ -426,7 +476,7 @@ async function main(): Promise<void> {
 		// --replace phase (rather than only once, before all five) shrinks
 		// the window from "the whole script's runtime" to "between this
 		// check and the next subprocess call".
-		if (replace && process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
+		if (replace) {
 			const rows = await client.query(
 				makeFunctionReference<"query", Record<string, never>, unknown[]>(
 					`proofVehicle/tables:${phase.table}`,

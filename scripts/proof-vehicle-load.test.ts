@@ -1,12 +1,17 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import {
 	buildImportRows,
+	childEnvForImport,
 	computeNonEmptyTables,
 	importArgs,
 	legacyMessagesPresent,
 	naturalKey,
 	planImportPhases,
 	resolveImportTarget,
+	sanitizedImportError,
 } from "./proof-vehicle-load";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp } from "../convex/proofVehicle/fixture";
@@ -151,20 +156,14 @@ test("resolveImportTarget rejects a missing admin key before any import", () => 
 	).toThrow(/PROOF_VEHICLE_ADMIN_KEY/);
 });
 
-// I2d/KTD5: every import carries --url/--admin-key and never
-// --deployment on the self-hosted path.
-test("importArgs passes the target URL and key to each import, without --deployment", () => {
-	const args = importArgs("rooms", "/tmp/rooms.jsonl", true, {
-		url: "http://127.0.0.1:3210",
-		adminKey: "k",
-	});
+// I2d/KTD5: imports carry no credentials on argv and never --deployment
+// on the self-hosted path -- the target reaches the child via
+// childEnvForImport instead (P1 #5: argv is visible to `ps`).
+test("importArgs carries no credentials and no --deployment", () => {
+	const args = importArgs("rooms", "/tmp/rooms.jsonl", true);
 	expect(args).toEqual([
 		"convex",
 		"import",
-		"--url",
-		"http://127.0.0.1:3210",
-		"--admin-key",
-		"k",
 		"--table",
 		"rooms",
 		"--yes",
@@ -172,13 +171,70 @@ test("importArgs passes the target URL and key to each import, without --deploym
 		"/tmp/rooms.jsonl",
 	]);
 	expect(args).not.toContain("--deployment");
+	expect(args).not.toContain("--url");
+	expect(args).not.toContain("--admin-key");
 });
 
 test("importArgs omits --replace for non-replace phases", () => {
-	const args = importArgs("likes", "/tmp/likes.jsonl", false, {
-		url: "http://127.0.0.1:3210",
-		adminKey: "k",
-	});
+	const args = importArgs("likes", "/tmp/likes.jsonl", false);
 	expect(args).not.toContain("--replace");
 	expect(args).not.toContain("--deployment");
+});
+
+test("childEnvForImport sets the self-hosted pair and strips project credentials", () => {
+	const env = childEnvForImport(
+		{ url: "http://127.0.0.1:3210", adminKey: "k" },
+		{
+			PATH: "/bin",
+			CONVEX_DEPLOYMENT: "stale-hosted",
+			CONVEX_DEPLOY_KEY: "stale-key",
+			CONVEX_DEPLOYMENT_TOKEN: "stale-token",
+		},
+	);
+	expect(env["CONVEX_SELF_HOSTED_URL"]).toBe("http://127.0.0.1:3210");
+	expect(env["CONVEX_SELF_HOSTED_ADMIN_KEY"]).toBe("k");
+	expect(env["PATH"]).toBe("/bin");
+	expect("CONVEX_DEPLOYMENT" in env).toBe(false);
+	expect("CONVEX_DEPLOY_KEY" in env).toBe(false);
+	expect("CONVEX_DEPLOYMENT_TOKEN" in env).toBe(false);
+});
+
+test("sanitizedImportError omits the command and key but names table and status", () => {
+	const raw: Error & { status: number } = Object.assign(
+		new Error("Command failed: npx convex import --admin-key sekrit --table rooms /tmp/x.jsonl"),
+		{ status: 1 },
+	);
+	const clean = sanitizedImportError("rooms", raw);
+	expect(clean.message).toContain("rooms");
+	expect(clean.message).toContain("status 1");
+	expect(clean.message).not.toContain("sekrit");
+	expect(clean.message).not.toContain("admin-key");
+});
+
+test("sanitizedImportError names signal kills and unknown outcomes without secrets", () => {
+	const killed: Error & { signal: string } = Object.assign(
+		new Error("Command failed: npx convex import --admin-key sekrit --table likes /tmp/x.jsonl"),
+		{ signal: "SIGKILL" },
+	);
+	const cleanKill = sanitizedImportError("likes", killed);
+	expect(cleanKill.message).toContain("likes");
+	expect(cleanKill.message).toContain("signal SIGKILL");
+	expect(cleanKill.message).not.toContain("sekrit");
+
+	const cleanUnknown = sanitizedImportError("likes", {});
+	expect(cleanUnknown.message).toContain("status unknown");
+});
+
+// P1 #1: the admin key must not appear on any shipped command line. The
+// sanitizer fixtures below are the only `--admin-key` literals allowed,
+// and they live in this test file, not in shipped code.
+test("shipped sources contain no --admin-key flag literal", () => {
+	const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+	for (const rel of ["scripts/proof-vehicle-load.ts", "convex/proofVehicle/fixture.ts"]) {
+		const text = readFileSync(join(root, rel), "utf8");
+		expect(
+			text.split("\n").filter((line) => line.includes("--admin-key")),
+			rel,
+		).toEqual([]);
+	}
 });
