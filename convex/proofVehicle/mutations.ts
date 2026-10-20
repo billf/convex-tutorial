@@ -11,7 +11,7 @@ import { mutation } from "../_generated/server";
 import type { MutationCtx } from "../_generated/server";
 import { v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
-import { bumpMarker, patchMessageBodyImpl } from "./fixture";
+import { bumpMarker } from "./fixture";
 
 export const sendMessage = mutation({
 	args: { room: v.id("rooms"), sender: v.id("users"), body: v.string() },
@@ -29,16 +29,20 @@ export const sendMessage = mutation({
 	},
 });
 
-// Delegates to fixture.ts's patchMessageBodyImpl so this mutation and
-// proofVehicle/fixture:patchMessageBody share one implementation and
-// cannot silently drift apart.
+// The canonical body patch (V4's post-bind step and the general Q13 delta
+// share this one registered mutation): `ctx.db.patch` never touches
+// `_creationTime` (system-assigned at insert), which is exactly the
+// invariant V4's tie depends on.
 export const updateMessageBody = mutation({
 	args: { message: v.id("messages"), body: v.string() },
 	returns: v.object({
 		affectedIds: v.object({ message: v.id("messages") }),
 		marker: v.number(),
 	}),
-	handler: patchMessageBodyImpl,
+	handler: async (ctx, args) => {
+		await ctx.db.patch("messages", args.message, { body: args.body });
+		return { affectedIds: { message: args.message }, marker: await bumpMarker(ctx) };
+	},
 });
 
 export const deleteMessage = mutation({
@@ -117,6 +121,43 @@ async function likeTargetsExist(
 	return messageDoc !== null && userDoc !== null;
 }
 
+/**
+ * Shared validate-then-write core for the membership/like txns (single and
+ * batch): these guards must stay in lockstep across every variant, so they
+ * live here once with the caller's own error text. The pre-validation
+ * itself intentionally differs per variant (single throws on any dangling
+ * target, batch skips dangling entries) -- only the membership-existence,
+ * single-room, and find-or-insert-like steps are shared.
+ */
+async function requireMembership(
+	ctx: MutationCtx,
+	membership: Id<"memberships">,
+	notFoundMessage: string,
+) {
+	const membershipDoc = await ctx.db.get("memberships", membership);
+	if (membershipDoc === null) {
+		throw new Error(notFoundMessage);
+	}
+	return membershipDoc;
+}
+
+function requireSameRoom(membershipRoom: Id<"rooms">, messageRoom: Id<"rooms">, message: string) {
+	if (messageRoom !== membershipRoom) {
+		throw new Error(message);
+	}
+}
+
+async function findOrInsertLike(
+	ctx: MutationCtx,
+	message: Id<"messages">,
+	user: Id<"users">,
+): Promise<Id<"likes">> {
+	const existing = await findLike(ctx, message, user);
+	return existing !== null
+		? existing._id
+		: await ctx.db.insert("likes", { message, user });
+}
+
 // Adding a like is idempotent: when the (message, user) pair already has
 // a row, the ack names that row instead of inserting a duplicate.
 export const addLike = mutation({
@@ -129,11 +170,7 @@ export const addLike = mutation({
 		if (!(await likeTargetsExist(ctx, args.message, args.user))) {
 			throw new Error("addLike: message and user must both exist");
 		}
-		const existing = await findLike(ctx, args.message, args.user);
-		const like =
-			existing !== null
-				? existing._id
-				: await ctx.db.insert("likes", { message: args.message, user: args.user });
+		const like = await findOrInsertLike(ctx, args.message, args.user);
 		return { affectedIds: { like }, marker: await bumpMarker(ctx) };
 	},
 });
@@ -174,10 +211,11 @@ export const membershipAndLikesTxn = mutation({
 	handler: async (ctx, args) => {
 		// Validate everything before writing anything: membership, then
 		// like targets, then the single-room invariant.
-		const membershipDoc = await ctx.db.get("memberships", args.membership);
-		if (membershipDoc === null) {
-			throw new Error("membershipAndLikesTxn: membership does not exist");
-		}
+		const membershipDoc = await requireMembership(
+			ctx,
+			args.membership,
+			"membershipAndLikesTxn: membership does not exist",
+		);
 		const [messageDoc, userDoc] = await Promise.all([
 			ctx.db.get("messages", args.message),
 			ctx.db.get("users", args.user),
@@ -185,17 +223,13 @@ export const membershipAndLikesTxn = mutation({
 		if (messageDoc === null || userDoc === null) {
 			throw new Error("membershipAndLikesTxn: message and user must both exist");
 		}
-		if (messageDoc.room !== membershipDoc.room) {
-			throw new Error(
-				"membershipAndLikesTxn: the liked message must be in the membership's room",
-			);
-		}
+		requireSameRoom(
+			membershipDoc.room,
+			messageDoc.room,
+			"membershipAndLikesTxn: the liked message must be in the membership's room",
+		);
 		await ctx.db.patch("memberships", args.membership, { active: args.active });
-		const existing = await findLike(ctx, args.message, args.user);
-		const like =
-			existing !== null
-				? existing._id
-				: await ctx.db.insert("likes", { message: args.message, user: args.user });
+		const like = await findOrInsertLike(ctx, args.message, args.user);
 		return {
 			affectedIds: { membership: args.membership, like },
 			marker: await bumpMarker(ctx),
@@ -230,10 +264,11 @@ export const membershipAndLikesBatchTxn = mutation({
 		if (args.likes.length === 0 || args.likes.length > 100) {
 			throw new Error("membershipAndLikesBatchTxn: likes must have 1 to 100 entries");
 		}
-		const membershipDoc = await ctx.db.get("memberships", args.membership);
-		if (membershipDoc === null) {
-			throw new Error("membershipAndLikesBatchTxn: membership does not exist");
-		}
+		const membershipDoc = await requireMembership(
+			ctx,
+			args.membership,
+			"membershipAndLikesBatchTxn: membership does not exist",
+		);
 		// Validate everything before writing anything: existence and room
 		// for every entry, so a rejection leaves membership, likes, and the
 		// marker all untouched.
@@ -251,22 +286,17 @@ export const membershipAndLikesBatchTxn = mutation({
 			// loop below: a cross-room entry whose user no longer exists is
 			// skipped, not rejected.
 			if (messageDoc === null || userDoc === null) continue;
-			if (messageDoc.room !== membershipDoc.room) {
-				throw new Error(
-					"membershipAndLikesBatchTxn: every liked message must be in the membership's room",
-				);
-			}
+			requireSameRoom(
+				membershipDoc.room,
+				messageDoc.room,
+				"membershipAndLikesBatchTxn: every liked message must be in the membership's room",
+			);
 		}
 		await ctx.db.patch("memberships", args.membership, { active: args.active });
 		const likes = [];
 		for (const { like, messageDoc, userDoc } of targets) {
 			if (messageDoc === null || userDoc === null) continue;
-			const existing = await findLike(ctx, like.message, like.user);
-			likes.push(
-				existing !== null
-					? existing._id
-					: await ctx.db.insert("likes", { message: like.message, user: like.user }),
-			);
+			likes.push(await findOrInsertLike(ctx, like.message, like.user));
 		}
 		return {
 			affectedIds: { membership: args.membership, likes },

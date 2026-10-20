@@ -4,7 +4,8 @@ import { expect, test } from "vitest";
 import { makeFunctionReference } from "convex/server";
 import type { Id, TableNames } from "../_generated/dataModel";
 import schema from "../schema";
-import { loadBaseIntoConvexTest, computeParity, type BaseOp } from "./fixture";
+import { loadBaseIntoConvexTest, type BaseOp } from "./fixture";
+import { computeParity } from "./parity";
 import corpus from "./corpus/v1.json";
 import parity from "./corpus/v1.parity.json";
 
@@ -98,7 +99,7 @@ const fixtureMarker = makeFunctionReference<"mutation", Record<string, never>, {
 const fixtureReset = makeFunctionReference<"mutation", Record<string, never>, null>(
 	"proofVehicle/fixture:reset",
 );
-const patchMessageBody = mutationRef("proofVehicle/fixture:patchMessageBody");
+const patchMessageBody = mutationRef("proofVehicle/mutations:updateMessageBody");
 
 type CorpusOutRow = {
 	id: string;
@@ -413,10 +414,18 @@ test("V4 (exact 50-row boundary and ID tie): the excluded 51st row and the inclu
 	expect(feed).toHaveLength(50);
 	expect(feed.some((row) => row._id === idByLabel.get("m01"))).toBe(false);
 
-	const expectedIds = new Set(
-		(vector.expectedBase as CorpusOutRow[]).map((row) => idByLabel.get(row.id)),
-	);
-	expect(new Set(feed.map((row) => row._id))).toEqual(expectedIds);
+	// Order-sensitive on the primary branch: the feed must be strictly
+	// descending by _creationTime. m50/m51 share one declared creationTime,
+	// so their relative order here is convex-test insertion timing, not the
+	// canonical _id tie-break -- that branch stays proven by the U11
+	// snapshot run only (see the corpus vector's own "note" field).
+	const tied = new Set([idByLabel.get("m50"), idByLabel.get("m51")]);
+	for (let i = 0; i + 1 < feed.length; i++) {
+		const a = feed[i];
+		const b = feed[i + 1];
+		if (tied.has(a._id) && tied.has(b._id)) continue;
+		expect(a._creationTime).toBeGreaterThan(b._creationTime);
+	}
 	for (const row of feed) {
 		expect(row.sender).toEqual({ _id: idByLabel.get("a"), name: "Ada" });
 		expect(row.likeCount).toBe(0);
@@ -785,6 +794,50 @@ test("membershipAndLikesTxn rejects a like spanning two rooms without writing", 
 			user: liker,
 		}),
 	).rejects.toThrow(/membership's room/);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(true);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("membershipAndLikesTxn rejects dangling targets without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const { m1, liker, deadMessage, deadUser } = await t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+		deadMessage: await ctx.db.insert("messages", { room, sender: user, body: "gone" }),
+		deadUser: await ctx.db.insert("users", { name: "Ghost" }),
+	}));
+	await t.run(async (ctx) => {
+		await ctx.db.delete("messages", deadMessage);
+		await ctx.db.delete("users", deadUser);
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	// Deleted message, live user.
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership,
+			active: false,
+			message: deadMessage,
+			user: liker,
+		}),
+	).rejects.toThrow(/must both exist/);
+	// Live message, deleted user.
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership,
+			active: false,
+			message: m1,
+			user: deadUser,
+		}),
+	).rejects.toThrow(/must both exist/);
 
 	const stored = await t.run(async (ctx) => ({
 		membership: await ctx.db.get("memberships", membership),
