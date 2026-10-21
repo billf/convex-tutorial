@@ -1,4 +1,9 @@
 import { expect, test } from "vitest";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	buildImportRows,
 	computeNonEmptyTables,
@@ -10,11 +15,13 @@ import {
 	planImportPhases,
 	redactSecrets,
 	resolveImportTarget,
+	runConvexImport,
+	runImportChild,
 	withDeadline,
 } from "./proof-vehicle-load";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp } from "../convex/proofVehicle/fixture";
-import { groupOpsByPhase } from "../convex/proofVehicle/basePlan";
+import { groupOpsByPhase, tableForOp } from "../convex/proofVehicle/basePlan";
 
 test("legacyMessagesPresent detects a pre-migration {user, body} row", () => {
 	expect(legacyMessagesPresent([{ room: "r1", sender: "u1", body: "hi" }])).toBe(false);
@@ -86,16 +93,7 @@ test("corpus: every vector's base ops have unique natural keys, per table", () =
 	for (const [vectorKey, vector] of Object.entries(corpus.vectors)) {
 		const byTable = new Map<string, string[]>();
 		for (const op of vector.base as BaseOp[]) {
-			const table =
-				op.op === "insertRoom"
-					? "rooms"
-					: op.op === "insertUser"
-						? "users"
-						: op.op === "insertMembership"
-							? "memberships"
-							: op.op === "insertMessage"
-								? "messages"
-								: "likes";
+			const table = tableForOp(op);
 			const keys = byTable.get(table) ?? [];
 			keys.push(naturalKey(op, new Map()));
 			byTable.set(table, keys);
@@ -118,12 +116,13 @@ test("computeNonEmptyTables returns [] when every table is empty", () => {
 	).toEqual([]);
 });
 
-// Branch-review BR1: rooms/users import with --replace, and convex/chat.ts
-// (the live tutorial app) shares those exact tables. A `npm run dev`
-// -populated deployment always has rooms/users rows (the first chat message
-// lazily creates one of each) well before it has any proof-vehicle
-// memberships/messages/likes rows -- this is the specific shape the guard
-// must catch to prevent the loader from silently wiping live chat data.
+// Branch-review BR1: every table imports with require-empty semantics, and
+// convex/chat.ts (the live tutorial app) shares the rooms/users tables. A
+// `npm run dev`-populated deployment always has rooms/users rows (the first
+// chat message lazily creates one of each) well before it has any
+// proof-vehicle memberships/messages/likes rows -- this is the specific
+// shape the guard must catch to prevent the loader from touching live data.
+
 test("computeNonEmptyTables (BR1): flags a deployment with only live chat rooms/users populated", () => {
 	expect(
 		computeNonEmptyTables({
@@ -177,17 +176,12 @@ test("resolveImportTarget rejects a missing admin key before any import", () => 
 // I2d/KTD5: the deployment binding travels in the child environment, never
 // in argv -- --admin-key on the command line is ps-visible, and Node
 // embeds argv in exec-failure messages that land in logs.
-test("importArgs carries no credentials and never --deployment", () => {
-	const args = importArgs("rooms", "/tmp/rooms.jsonl", true);
-	expect(args).toEqual(["convex", "import", "--table", "rooms", "--yes", "--replace", "/tmp/rooms.jsonl"]);
+test("importArgs never passes --replace: imports require empty tables", () => {
+	const args = importArgs("rooms", "/tmp/rooms.jsonl");
+	expect(args).toEqual(["convex", "import", "--table", "rooms", "--yes", "/tmp/rooms.jsonl"]);
+	expect(args).not.toContain("--replace");
 	expect(args).not.toContain("--url");
 	expect(args).not.toContain("--admin-key");
-	expect(args).not.toContain("--deployment");
-});
-
-test("importArgs omits --replace for non-replace phases", () => {
-	const args = importArgs("likes", "/tmp/likes.jsonl", false);
-	expect(args).not.toContain("--replace");
 	expect(args).not.toContain("--deployment");
 });
 
@@ -240,4 +234,104 @@ test("withDeadline resolves fast reads and names hung ones", async () => {
 	await expect(withDeadline(Promise.reject(new Error("inner boom")), 1000, "sad")).rejects.toThrow(
 		/inner boom/,
 	);
+});
+
+// runImportChild/runConvexImport subprocess paths: a fake spawn stands in
+// for npx so the watchdog, group-kill, exit mapping, and tempdir cleanup
+// run without a live deployment.
+
+type FakeChild = EventEmitter & { pid: number | undefined; kill: (signal?: string) => boolean };
+
+function fakeSpawn(behavior: "stall" | "fail" | "succeed", seen: { kill?: string; pid: number }) {
+	return (_cmd: string, _args: readonly string[], _opts: unknown) => {
+		const child = new EventEmitter() as FakeChild;
+		child.pid = seen.pid;
+		child.kill = (signal?: string) => {
+			seen.kill = signal ?? "SIGTERM";
+			return true;
+		};
+		if (behavior === "fail") {
+			setImmediate(() => child.emit("exit", 1, null));
+		} else if (behavior === "succeed") {
+			setImmediate(() => child.emit("exit", 0, null));
+		}
+		return child as unknown as ChildProcess;
+	};
+}
+
+function tempDirs(prefix: string): string[] {
+	return readdirSync(tmpdir()).filter((entry) => entry.startsWith(prefix));
+}
+
+const loadTarget = { url: "http://127.0.0.1:3210", adminKey: "k" };
+
+test("runImportChild watchdog kills a stalled tree and names the table", async () => {
+	const seen: { kill?: string; pid: number } = { pid: 99999 };
+	const kills: [number, string][] = [];
+	await expect(
+		runImportChild(["convex", "import"], { PATH: "/bin" }, "rooms", {
+			spawnChild: fakeSpawn("stall", seen),
+			killTree: (pid, signal) => {
+				kills.push([pid, signal]);
+			},
+			timeoutMs: 20,
+		}),
+	).rejects.toThrow(/timed out after 20ms for rooms/);
+	expect(kills).toEqual([[-99999, "SIGKILL"]]);
+});
+
+test("runImportChild maps a failing exit to a table-named error", async () => {
+	const seen: { kill?: string; pid: number } = { pid: 99999 };
+	await expect(
+		runImportChild(["convex", "import"], { PATH: "/bin" }, "likes", {
+			spawnChild: fakeSpawn("fail", seen),
+			timeoutMs: 1000,
+		}),
+	).rejects.toThrow(/exited 1 for likes/);
+	expect(seen.kill).toBeUndefined();
+});
+
+test("runConvexImport removes its tempdir on success and on failure", async () => {
+	const seen: { kill?: string; pid: number } = { pid: 99999 };
+	const before = tempDirs("proof-vehicle-load-");
+	await runConvexImport("rooms", [{ name: "r1" }], loadTarget, {
+		spawnChild: fakeSpawn("succeed", seen),
+		timeoutMs: 1000,
+	});
+	await expect(
+		runConvexImport("rooms", [{ name: "r1" }], loadTarget, {
+			spawnChild: fakeSpawn("fail", seen),
+			timeoutMs: 1000,
+		}),
+	).rejects.toThrow(/exited 1/);
+	expect(tempDirs("proof-vehicle-load-")).toEqual(before);
+	expect(seen.kill).toBeUndefined();
+});
+
+test("runImportChild forwards SIGINT to the tree and re-raises it", async () => {
+	const seen: { kill?: string; pid: number } = { pid: 99999 };
+	const kills: [number, string][] = [];
+	const raised: string[] = [];
+	const baselineSigint = process.listenerCount("SIGINT");
+	const pending = runImportChild(["convex", "import"], { PATH: "/bin" }, "rooms", {
+		spawnChild: fakeSpawn("stall", seen),
+		killTree: (pid, signal) => {
+			kills.push([pid, signal]);
+		},
+		raiseSelf: (signal) => {
+			raised.push(signal);
+		},
+		timeoutMs: 50,
+	});
+	expect(process.listenerCount("SIGINT")).toBe(baselineSigint + 1);
+	process.emit("SIGINT");
+	// Forwarding kills the tree immediately; the still-armed watchdog fires
+	// its own kill as a backstop before the rejection below settles.
+	await expect(pending).rejects.toThrow(/timed out/);
+	expect(kills).toEqual([
+		[-99999, "SIGKILL"],
+		[-99999, "SIGKILL"],
+	]);
+	expect(raised).toEqual(["SIGINT"]);
+	expect(process.listenerCount("SIGINT")).toBe(baselineSigint);
 });

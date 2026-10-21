@@ -4,11 +4,13 @@
  * 2026-09-11-1159-feat-skip-shared-prerequisites-plan.md, U5, KTD5).
  *
  * Loads one corpus vector (V1-V6) into a real Convex deployment: phased
- * `npx convex import` for the base state (rooms/users first with
- * `--replace`, then memberships/messages with resolved foreign keys, then
- * likes), then ID read-back through `proofVehicle/tables:*` queries and
- * label binding. Prints the label-binding map as JSON on stdout so a caller
- * (a harness, or a human) never has to infer real IDs.
+ * `npx convex import` for the base state (rooms/users first, then
+ * memberships/messages with resolved foreign keys, then likes), then ID
+ * read-back through `proofVehicle/tables:*` queries and label binding.
+ * Prints the label-binding map as JSON on stdout so a caller
+ * (a harness, or a human) never has to infer real IDs. Every phase
+ * imports with require-empty semantics (no `--replace` anywhere): any
+ * pre-existing row aborts the run before anything is written.
  *
  * Does NOT perform V4's post-bind body patch (`proofVehicle/mutations:
  * updateMessageBody`): m50/m51's bodies import verbatim from the corpus.
@@ -34,28 +36,25 @@
  * `npx convex env set` (no URL/key binding) targets the CLI's own default
  * dev deployment instead, which can silently differ from CONVEX_URL.
  *
- * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
- * import with `--replace`, which clears those tables entirely -- and
- * convex/chat.ts (the live tutorial chat app) reads/writes those same
- * tables. This loader refuses to run against any deployment where
- * rooms/users/memberships/messages/likes already has rows (a `npm run dev`
- * deployment always does, from its first chat message onward). Reset first
- * with the key in the environment, never in argv (argv is ps-visible):
+ * DO NOT point this at the same deployment `npm run dev` uses: a `npm run
+ * dev`-populated deployment always has rows (from its first chat message
+ * onward), and this loader refuses to run unless every proof-vehicle
+ * table is empty. Reset first with the key in the environment, never in
+ * argv (argv is ps-visible):
  * `CONVEX_SELF_HOSTED_URL="$CONVEX_URL"
  * CONVEX_SELF_HOSTED_ADMIN_KEY="$PROOF_VEHICLE_ADMIN_KEY" npx convex run
  * proofVehicle/fixture:reset '{}'` (requires `PROOF_VEHICLE_FIXTURE=1`
  * on that deployment; the same URL/key binding matters here too
  * -- a bare `npx convex run` targets the CLI's default dev deployment, not
  * necessarily the one this loader just checked) or point at a fresh
- * deployment -- do not just set `PROOF_VEHICLE_ALLOW_NONEMPTY=1` to skip
- * the check; on a nonempty target that still replaces rooms/users and can
- * still leave a partial import (see the error text this throws for why).
+ * deployment.
  *
  * The emptiness check is point-in-time (once before the run, and again
- * immediately before each --replace phase) with no lock held across the
- * import -- run this only against a deployment with no other writer
- * (nothing else calling chat:sendMessage/getOrCreateUser or the
- * proofVehicle mutations) for its duration.
+ * immediately before each phase) with no lock held across the import --
+ * run this only against a deployment with no other writer (nothing else
+ * calling chat:sendMessage/getOrCreateUser or the proofVehicle mutations)
+ * for its duration. Without --replace, a concurrent write fails the run
+ * loudly instead of being silently destroyed.
  *
  * NOTE: V1 has been run against a live self-hosted deployment in this
  * environment (local backend on 127.0.0.1:3210, using the I2d CONVEX_URL /
@@ -66,6 +65,7 @@
  */
 
 import { spawn } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,7 +73,14 @@ import { ConvexHttpClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp, Phase } from "../convex/proofVehicle/basePlan";
-import { groupOpsByPhase, naturalKey as sharedNaturalKey } from "../convex/proofVehicle/basePlan";
+import { groupOpsByPhase, naturalKey as sharedNaturalKey, tableForOp } from "../convex/proofVehicle/basePlan";
+
+/** Minimal spawn surface runImportChild needs (real or fake in tests). */
+export type SpawnChildFn = (
+	command: string,
+	args: readonly string[],
+	options: SpawnOptions,
+) => ChildProcess;
 
 // Toolchain note: typescript@5.0's lib predates Promise.withResolvers
 // (runtime Node here is v22+). Declare the shape locally rather than
@@ -191,11 +198,11 @@ export function resolveImportTarget(env: NodeJS.ProcessEnv): ImportTarget {
  * Extracted so the flag shape is unit-testable without a live deployment
  * -- the subprocess call itself cannot be.
  */
-export function importArgs(table: string, file: string, replace: boolean): string[] {
-	const args = ["convex", "import", "--table", table, "--yes"];
-	if (replace) args.push("--replace");
-	args.push(file);
-	return args;
+export function importArgs(table: string, file: string): string[] {
+	// No --replace, ever: imports require empty tables, so a concurrent
+	// writer (or a rerun without reset) fails loudly instead of silently
+	// deleting live rows. See the module header.
+	return ["convex", "import", "--table", table, "--yes", file];
 }
 
 /**
@@ -222,21 +229,25 @@ export function importEnv(
 
 /** Strips the admin key from text about to hit stderr/CI logs. */
 export function redactSecrets(message: string, target: ImportTarget): string {
+	// An empty key would split every character and balloon the message;
+	// resolveImportTarget already rejects empty keys, so this is unreachable
+	// defense for any future direct caller.
+	if (target.adminKey.length === 0) return message;
 	return message.split(target.adminKey).join("[redacted-admin-key]");
 }
 
-async function runConvexImport(
+export async function runConvexImport(
 	table: string,
 	rows: Record<string, unknown>[],
-	replace: boolean,
 	target: ImportTarget,
+	deps: ImportRunnerDeps = {},
 ): Promise<void> {
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
 	const file = join(dir, `${table}.jsonl`);
 	try {
 		writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
-		const args = importArgs(table, file, replace);
-		await runImportChild(args, importEnv(target), table);
+		const args = importArgs(table, file);
+		await runImportChild(args, importEnv(target), table, deps);
 	} catch (error) {
 		throw new Error(
 			redactSecrets(error instanceof Error ? error.message : String(error), target),
@@ -247,7 +258,26 @@ async function runConvexImport(
 }
 
 /**
- * Runs one `npx convex import` child with a 120s watchdog. A stalled
+ * Process-group kill (negative-pid SIGKILL) works on POSIX only; the
+ * watchdog falls back to plain child.kill on win32. Read once: the loader
+ * never changes platform mid-run.
+ */
+const KILL_PROCESS_GROUP = process.platform !== "win32";
+
+/** Test seams for runImportChild/runConvexImport (real spawn/kill/timers by default). */
+export interface ImportRunnerDeps {
+	spawnChild?: SpawnChildFn;
+	killTree?: (pid: number, signal: NodeJS.Signals) => void;
+	raiseSelf?: (signal: NodeJS.Signals) => void;
+	timeoutMs?: number;
+}
+
+const defaultKillTree = (pid: number, signal: NodeJS.Signals): void => {
+	process.kill(pid, signal);
+};
+
+/**
+ * Runs one `npx convex import` child with a watchdog. A stalled
  * subprocess (network partition, stalled npx resolution, an interactive
  * prompt this non-interactive caller can't answer) must not block the
  * loader indefinitely -- and the watchdog must kill the whole process
@@ -255,32 +285,69 @@ async function runConvexImport(
  * CLI as a grandchild that would otherwise survive the timeout and keep
  * writing underneath a retry. `detached` makes the child a process-group
  * leader (POSIX) so a negative-pid SIGKILL takes the group with it.
+ *
+ * Operator abort (Ctrl-C / SIGTERM) is forwarded to the tree too: without
+ * forwarding, killing only the loader orphans a detached import that keeps
+ * writing after the operator stopped the run. Forwarders live only for the
+ * child's lifetime and are removed on every settle path.
  */
-function runImportChild(args: string[], env: NodeJS.ProcessEnv, table: string): Promise<void> {
+export function runImportChild(
+	args: string[],
+	env: NodeJS.ProcessEnv,
+	table: string,
+	deps: ImportRunnerDeps = {},
+): Promise<void> {
+	const {
+		spawnChild = spawn,
+		killTree = defaultKillTree,
+		raiseSelf = (signal: NodeJS.Signals) => process.kill(process.pid, signal),
+		timeoutMs = 120_000,
+	} = deps;
 	const { promise: done, resolve, reject } = Promise.withResolvers<void>();
-	const child = spawn("npx", args, {
+	const child = spawnChild("npx", args, {
 		stdio: "inherit",
 		env,
-		detached: process.platform !== "win32",
+		detached: KILL_PROCESS_GROUP,
 	});
-	const timer = setTimeout(() => {
-		if (process.platform !== "win32" && child.pid !== undefined) {
+	const killWholeTree = (): void => {
+		if (KILL_PROCESS_GROUP && child.pid !== undefined) {
 			try {
-				process.kill(-child.pid, "SIGKILL");
+				killTree(-child.pid, "SIGKILL");
 			} catch {
 				// Group already gone; the exit handler below settles this.
 			}
+		} else {
+			child.kill("SIGKILL");
 		}
-		reject(new Error(`convex import timed out after 120s for ${table}`));
-	}, 120_000);
+	};
+	const abortSignals = ["SIGINT", "SIGTERM"] as const;
+	// Bind the signal name explicitly: the runtime invokes these listeners
+	// with no arguments, so a shared (signal) => ... handler would forward
+	// undefined instead of re-raising the received signal.
+	const forwarders = abortSignals.map((signal) => {
+		const forward = (): void => {
+			killWholeTree();
+			raiseSelf(signal);
+		};
+		process.once(signal, forward);
+		return { signal, forward };
+	});
+	const settle = (fn: () => void): void => {
+		for (const { signal, forward } of forwarders) process.removeListener(signal, forward);
+		fn();
+	};
+	const timer = setTimeout(() => {
+		killWholeTree();
+		settle(() => reject(new Error(`convex import timed out after ${timeoutMs}ms for ${table}`)));
+	}, timeoutMs);
 	child.on("error", (error) => {
 		clearTimeout(timer);
-		reject(error);
+		settle(() => reject(error));
 	});
 	child.on("exit", (code, signal) => {
 		clearTimeout(timer);
-		if (code === 0) resolve();
-		else reject(new Error(`convex import ${signal ?? `exited ${code}`} for ${table}`));
+		if (code === 0) settle(resolve);
+		else settle(() => reject(new Error(`convex import ${signal ?? `exited ${code}`} for ${table}`)));
 	});
 	return done;
 }
@@ -299,19 +366,19 @@ function runImportChild(args: string[], env: NodeJS.ProcessEnv, table: string): 
  */
 export function naturalKey(op: BaseOp, idByLabel: ReadonlyMap<string, string>): string {
 	const resolve = (label: string) => idByLabel.get(label) ?? label;
+	const table = tableForOp(op);
 	switch (op.op) {
 		case "insertRoom":
-			return sharedNaturalKey("rooms", () => op.name);
 		case "insertUser":
-			return sharedNaturalKey("users", () => op.name);
+			return sharedNaturalKey(table, () => op.name);
 		case "insertMessage":
-			return sharedNaturalKey("messages", () => op.body);
+			return sharedNaturalKey(table, () => op.body);
 		case "insertMembership":
-			return sharedNaturalKey("memberships", (field) =>
+			return sharedNaturalKey(table, (field) =>
 				resolve(field === "room" ? op.room : op.user),
 			);
 		case "insertLike":
-			return sharedNaturalKey("likes", (field) =>
+			return sharedNaturalKey(table, (field) =>
 				resolve(field === "message" ? op.message : op.user),
 			);
 	}
@@ -457,21 +524,16 @@ async function main(): Promise<void> {
 		);
 	}
 
-	// Only rooms/users import with --replace, which clears the ENTIRE
-	// table, not just proof-vehicle rows.
-	// rooms/users are the SAME tables convex/chat.ts (the live tutorial app)
-	// reads and writes via getOrCreateDefaultRoom/getOrCreateUser -- running
-	// this loader against the same deployment `npm run dev` uses would
-	// silently delete every real chat room and user with no confirmation
-	// prompt. Refusing to run at all when rooms/users (or any proof-vehicle
-	// table) already has rows -- which a `npm run dev`-populated deployment
-	// always will, since the first chat message lazily creates a room and
-	// user -- makes that scenario fail loudly instead of silently, without
-	// requiring the loader to know which rows are "its own" (KTD8's schema
-	// has no proof-vehicle-specific ownership marker to scope a narrower
-	// delete by). Bypass: PROOF_VEHICLE_ALLOW_NONEMPTY=1, for a deployment
-	// the operator has explicitly decided is disposable.
-	if (process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
+	// Every table imports with require-empty semantics (no --replace
+	// anywhere): any pre-existing row aborts the run before anything is
+	// written. rooms/users are the SAME tables convex/chat.ts (the live
+	// tutorial app) reads and writes -- running this loader against the
+	// same deployment `npm run dev` uses would fail loudly instead of
+	// silently deleting live data, without requiring the loader to know
+	// which rows are "its own" (KTD8's schema has no proof-vehicle-specific
+	// ownership marker to scope a narrower delete by). Only a fresh or
+	// reset deployment loads cleanly.
+	{
 		// Independent preflight reads: fetch concurrently, then apply the
 		// same guard predicate to the same keyed inputs.
 		const [rooms, users, memberships, likes] = await Promise.all([
@@ -524,15 +586,9 @@ async function main(): Promise<void> {
 		if (nonEmptyTables.length > 0) {
 			throw new Error(
 				`non-empty-target: this deployment already has rows in [${nonEmptyTables.join(", ")}]. ` +
-					"Running this loader here would either replace live rooms/users data (if this is the " +
-					"deployment `npm run dev` uses) or leave a partial import (--replace on rooms/users " +
-					"only, requireEmpty on the rest). Use a fresh/disposable deployment, or run " +
-					"`proofVehicle/fixture:reset` first and re-run. PROOF_VEHICLE_ALLOW_NONEMPTY=1 skips " +
-					"this check entirely -- it is NOT a safe alternative to reset: on a nonempty target it " +
-					"still replaces rooms/users and can still hit requireEmpty rejections on " +
-					"memberships/messages/likes, leaving fresh rooms/users IDs with stale rows pointing at " +
-					"the old (now-deleted) ones. Only set it on a deployment you have separately verified " +
-					"is safe to lose all proof-vehicle-table data on, and prefer reset first regardless.",
+					"Every table imports with require-empty semantics (no --replace anywhere), so loading " +
+					"here would fail partway and leave a partial import. Use a fresh/disposable deployment, " +
+					"or run `proofVehicle/fixture:reset` first and re-run.",
 			);
 		}
 	}
@@ -542,37 +598,31 @@ async function main(): Promise<void> {
 	const idByLabel = new Map<string, string>();
 
 	for (const phase of phases) {
-		const replace = phase.table === "rooms" || phase.table === "users";
 		// The preflight guard above is point-in-time and holds no lock across
-		// this loop; live traffic (a chat message, sendMessage's BR8
-		// membership write) landing after it passes and before a --replace
-		// phase runs would be silently destroyed by that --replace. This
-		// can't close the race -- Convex has no cross-request lock this
-		// script can take -- but re-checking immediately before each
-		// --replace phase (rather than only once, before all five) shrinks
-		// the window from "the whole script's runtime" to "between this
-		// check and the next subprocess call".
-		if (replace && process.env["PROOF_VEHICLE_ALLOW_NONEMPTY"] !== "1") {
-			const rows = await withDeadline(
-				client.query(
-					makeFunctionReference<"query", Record<string, never>, unknown[]>(
-						`proofVehicle/tables:${phase.table}`,
-					),
-					{},
+		// this loop; without --replace, a concurrent write no longer gets
+		// silently destroyed -- the require-empty import fails loudly
+		// instead. Re-checking immediately before each phase (rather than
+		// only once, before all five) still fails fast with a clear error
+		// instead of a mid-loop import rejection.
+		const rows = await withDeadline(
+			client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					`proofVehicle/tables:${phase.table}`,
 				),
-				60_000,
-				`tables:${phase.table} pre-replace recheck`,
+				{},
+			),
+			60_000,
+			`tables:${phase.table} pre-import recheck`,
+		);
+		if (rows.length > 0) {
+			throw new Error(
+				`non-empty-target: ${phase.table} gained rows after the initial preflight check ` +
+					"(likely live traffic during this run). Refusing to import into it. Re-run after " +
+					"confirming the deployment is quiesced.",
 			);
-			if (rows.length > 0) {
-				throw new Error(
-					`non-empty-target: ${phase.table} gained rows after the initial preflight check ` +
-						"(likely live traffic during this run). Refusing to --replace it. Re-run after " +
-						"confirming the deployment is quiesced.",
-				);
-			}
 		}
-		const rows = buildImportRows(phase, idByLabel);
-		await runConvexImport(phase.table, rows, replace, target);
+		const rowsToImport = buildImportRows(phase, idByLabel);
+		await runConvexImport(phase.table, rowsToImport, target);
 		for (const [label, id] of await readBackLabels(client, phase, idByLabel)) {
 			idByLabel.set(label, id);
 		}
