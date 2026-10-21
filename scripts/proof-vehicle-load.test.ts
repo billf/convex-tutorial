@@ -5,6 +5,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	assertSupportedPlatform,
 	buildImportRows,
 	computeNonEmptyTables,
 	importArgs,
@@ -83,6 +84,30 @@ test("buildImportRows throws on an unbound label", () => {
 	expect(() => buildImportRows(phase, new Map())).toThrow(/unbound label/);
 });
 
+// The op->table mapping below is a literal oracle, deliberately NOT
+// basePlan.tableForOp: the lint must stay independent of the helper the
+// loader itself uses, so a future mis-mapping fails loudly instead of
+// passing on both sides.
+const EXPECTED_TABLE_FOR_OP = {
+	insertRoom: "rooms",
+	insertUser: "users",
+	insertMembership: "memberships",
+	insertMessage: "messages",
+	insertLike: "likes",
+} as const satisfies Record<BaseOp["op"], string>;
+
+test("tableForOp matches the literal op-to-table contract", () => {
+	const sample: Record<BaseOp["op"], BaseOp> = {
+		insertRoom: { op: "insertRoom", label: "x", name: "x" },
+		insertUser: { op: "insertUser", label: "x", name: "x" },
+		insertMembership: { op: "insertMembership", label: "x", room: "x", user: "x", active: true },
+		insertMessage: { op: "insertMessage", label: "x", room: "x", sender: "x", body: "x", creationTime: 0 },
+		insertLike: { op: "insertLike", label: "x", message: "x", user: "x" },
+	};
+	for (const op of Object.values(sample)) {
+		expect(tableForOp(op)).toBe(EXPECTED_TABLE_FOR_OP[op.op]);
+	}
+});
 // u5 review M2: readBackLabels binds an imported row back to its corpus
 // label via naturalKey (name/body/FK-pair), with no enforced uniqueness. A
 // future corpus edit that introduces a within-vector duplicate would
@@ -93,7 +118,7 @@ test("corpus: every vector's base ops have unique natural keys, per table", () =
 	for (const [vectorKey, vector] of Object.entries(corpus.vectors)) {
 		const byTable = new Map<string, string[]>();
 		for (const op of vector.base as BaseOp[]) {
-			const table = tableForOp(op);
+			const table = EXPECTED_TABLE_FOR_OP[op.op];
 			const keys = byTable.get(table) ?? [];
 			keys.push(naturalKey(op, new Map()));
 			byTable.set(table, keys);
@@ -106,6 +131,25 @@ test("corpus: every vector's base ops have unique natural keys, per table", () =
 				);
 				seen.add(key);
 			}
+		}
+	}
+});
+
+// loadBaseIntoConvexTest throws on a label reused across tables, but a
+// label reused twice within one table still last-wins silently in that
+// table's map (the first row is inserted yet never bound). Lint every
+// vector's base ops for that today.
+test("corpus: labels are unique within each table's base ops, per vector", () => {
+	for (const [vectorKey, vector] of Object.entries(corpus.vectors)) {
+		const seen = new Map<string, string>();
+		for (const op of vector.base as BaseOp[]) {
+			const table = EXPECTED_TABLE_FOR_OP[op.op];
+			const prior = seen.get(op.label);
+			expect(
+				prior,
+				`${vectorKey}: label "${op.label}" reused (first in ${prior}, now in ${table})`,
+			).toBeUndefined();
+			seen.set(op.label, table);
 		}
 	}
 });
@@ -194,6 +238,12 @@ test("importEnv binds the child to the target deployment via env, dropping CONVE
 	expect(env["CONVEX_SELF_HOSTED_ADMIN_KEY"]).toBe("k");
 	expect(env["CONVEX_DEPLOYMENT"]).toBeUndefined();
 	expect(env["PATH"]).toBe("/bin");
+});
+
+test("assertSupportedPlatform passes on POSIX and refuses win32", () => {
+	expect(() => assertSupportedPlatform("darwin")).not.toThrow();
+	expect(() => assertSupportedPlatform("linux")).not.toThrow();
+	expect(() => assertSupportedPlatform("win32")).toThrow(/not supported/);
 });
 
 test("redactSecrets strips the admin key from text bound for logs", () => {

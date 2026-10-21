@@ -97,6 +97,21 @@ declare global {
 const EPOCH_BASE_MS = Date.parse("2026-01-01T00:00:00Z");
 
 /**
+ * The loader supervises its import subprocesses with POSIX process-group
+ * kill and passes credentials via child-environment variables. Windows
+ * supports neither path, so fail loudly up front instead of running a
+ * loader whose supervision cannot work there.
+ */
+export function assertSupportedPlatform(platform: string = process.platform): void {
+	if (platform === "win32") {
+		throw new Error(
+			"proof-vehicle-load: Windows is not supported (no POSIX process-group supervision); " +
+				"run this loader on macOS or Linux.",
+		);
+	}
+}
+
+/**
  * KTD8's precondition: a deployment loader must abort rather than write
  * data on top of pre-migration `{user, body}` rows. `messages` rows this
  * loader itself wrote always carry `room`; a legacy row never does.
@@ -486,6 +501,7 @@ export function withDeadline<T>(promise: Promise<T>, ms: number, what: string): 
 }
 
 async function main(): Promise<void> {
+	assertSupportedPlatform();
 	const vectorId = process.argv[2];
 	if (vectorId === undefined || !(vectorId in corpus.vectors)) {
 		console.error(`Usage: proof-vehicle-load.ts <${Object.keys(corpus.vectors).join("|")}>`);
