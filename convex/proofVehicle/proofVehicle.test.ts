@@ -85,7 +85,11 @@ const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
 //   keys to resolve the same way -- without it, label strings inside
 //   `likes[]` pass through unresolved and fail the mutation's `v.id`
 //   validators (the M6 failure class, one level down).
-// A parity test below pins this map's key set to the registered MUTATIONS.
+// Limitation: a delta label still binds a single `affectedIds[bindKey]`
+// value, but the batch txn acks `likes` as an *array* -- so no label can
+// name a batch-created like, and chained deltas off batch likes are
+// inexpressible in this harness today. Name batch-created likes by
+// querying them back (as the direct batch tests do), not by label.
 const MUTATION_TEST_META: Record<
 	string,
 	{ bindKey: string; idArgKeys: readonly string[]; nestedIdArgKeys?: Record<string, readonly string[]> }
@@ -111,62 +115,90 @@ test("MUTATION_TEST_META covers exactly the registered MUTATIONS", () => {
 });
 
 // Every MUTATION_TEST_META `bindKey` names a key its mutation's ack
-// actually returns: the key-set parity test above cannot catch a mistyped
-// value, so each mutation runs once against real rows and its ack is
-// checked for the bound key. Deletes run last; nothing here depends on
-// the order beyond that.
-test("every MUTATION_TEST_META bindKey is present in its mutation's ack", async () => {
+// actually returns, holding the row the mutation wrote: the key-set parity
+// test above cannot catch a mistyped value or a right-key/wrong-id ack (the
+// M5 class), so each mutation runs once against real rows, the bound key is
+// asserted present, and the bound id is asserted to name the written row.
+// Deletes run last against dedicated targets with decoys left behind, so a
+// wrong-row delete is caught by the surviving decoy.
+test("every MUTATION_TEST_META bindKey is present in its mutation's ack and names the written row", async () => {
 	const t = convexTest(schema, modules);
 	const ids = await t.run(async (ctx) => {
 		const room = await ctx.db.insert("rooms", { name: "r" });
 		const user = await ctx.db.insert("users", { name: "u" });
+		const decoyUser = await ctx.db.insert("users", { name: "w" });
 		const membership = await ctx.db.insert("memberships", { room, user, active: true });
 		const message = await ctx.db.insert("messages", { room, sender: user, body: "m" });
-		return { room, user, membership, message };
+		const decoyLike = await ctx.db.insert("likes", { message, user: decoyUser });
+		return { room, user, decoyUser, membership, message, decoyLike };
 	});
-	const acked = async (name: string, args: Record<string, unknown>): Promise<Record<string, string>> => {
-		const ack = await t.mutation(MUTATIONS[name]!, args);
-		return ack.affectedIds;
-	};
+	const messages = () => t.run((ctx) => ctx.db.query("messages").collect());
+	const likes = () => t.run((ctx) => ctx.db.query("likes").collect());
 	const check = (name: string, affectedIds: Record<string, string>) => {
 		const bindKey = MUTATION_TEST_META[name]?.bindKey;
 		expect(bindKey, `${name} has a bindKey`).toBeDefined();
 		expect(affectedIds[bindKey!], `${name} ack names ${bindKey}`).toBeDefined();
 	};
 
-	const sendAck = await acked("sendMessage", { room: ids.room, sender: ids.user, body: "n" });
-	check("sendMessage", sendAck);
-	check(
-		"updateMessageBody",
-		await acked("updateMessageBody", { message: sendAck["message"], body: "n2" }),
-	);
-	const likeAck = await acked("addLike", { message: ids.message, user: ids.user });
-	check("addLike", likeAck);
-	check("removeLike", await acked("removeLike", { like: likeAck["like"] }));
+	const sendAck = await t.mutation(MUTATIONS["sendMessage"]!, {
+		room: ids.room,
+		sender: ids.user,
+		body: "n",
+	});
+	check("sendMessage", sendAck.affectedIds);
+	expect((await messages()).find((m) => m.body === "n")!._id).toBe(sendAck.affectedIds["message"]);
+	await t.mutation(MUTATIONS["updateMessageBody"]!, {
+		message: sendAck.affectedIds["message"],
+		body: "n2",
+	});
+	expect((await messages()).find((m) => m.body === "n2")!._id).toBe(sendAck.affectedIds["message"]);
+
+	const addAck = await t.mutation(MUTATIONS["addLike"]!, { message: ids.message, user: ids.user });
+	check("addLike", addAck.affectedIds);
+	expect(
+		(await likes()).find((l) => l.message === ids.message && l.user === ids.user)!._id,
+	).toBe(addAck.affectedIds["like"]);
+	check("removeLike", (await t.mutation(MUTATIONS["removeLike"]!, { like: addAck.affectedIds["like"] })).affectedIds);
+	expect((await likes()).some((l) => l.message === ids.message && l.user === ids.user)).toBe(false);
+	expect((await likes()).some((l) => l._id === ids.decoyLike)).toBe(true);
+
 	check(
 		"setMembershipActive",
-		await acked("setMembershipActive", { membership: ids.membership, active: false }),
+		(await t.mutation(MUTATIONS["setMembershipActive"]!, { membership: ids.membership, active: false }))
+			.affectedIds,
 	);
+	expect((await t.run((ctx) => ctx.db.get("memberships", ids.membership)))?.active).toBe(false);
+	const txnAck = await t.mutation(MUTATIONS["membershipAndLikesTxn"]!, {
+		membership: ids.membership,
+		active: true,
+		message: ids.message,
+		user: ids.user,
+	});
+	check("membershipAndLikesTxn", txnAck.affectedIds);
+	expect(
+		(await likes()).find((l) => l.message === ids.message && l.user === ids.user)!._id,
+	).toBe(txnAck.affectedIds["like"]);
+	const batchAck = await t.mutation(MUTATIONS["membershipAndLikesBatchTxn"]!, {
+		membership: ids.membership,
+		active: true,
+		likes: [{ message: ids.message, user: ids.user }],
+	});
+	check("membershipAndLikesBatchTxn", batchAck.affectedIds);
+	expect(batchAck.affectedIds["membership"]).toBe(ids.membership);
+	expect((await likes()).some((l) => l.message === ids.message && l.user === ids.user)).toBe(true);
+
 	check(
-		"membershipAndLikesTxn",
-		await acked("membershipAndLikesTxn", {
-			membership: ids.membership,
-			active: true,
-			message: ids.message,
-			user: ids.user,
-		}),
+		"deleteMessage",
+		(await t.mutation(MUTATIONS["deleteMessage"]!, { message: sendAck.affectedIds["message"] }))
+			.affectedIds,
 	);
-	check(
-		"membershipAndLikesBatchTxn",
-		await acked("membershipAndLikesBatchTxn", {
-			membership: ids.membership,
-			active: true,
-			likes: [{ message: ids.message, user: ids.user }],
-		}),
-	);
-	check("deleteMessage", await acked("deleteMessage", { message: sendAck["message"] }));
-	check("renameUser", await acked("renameUser", { user: ids.user, name: "v" }));
-	check("deleteUser", await acked("deleteUser", { user: ids.user }));
+	expect((await messages()).some((m) => m.body === "n2")).toBe(false);
+	expect((await messages()).some((m) => m._id === ids.message)).toBe(true);
+	check("renameUser", (await t.mutation(MUTATIONS["renameUser"]!, { user: ids.user, name: "v" })).affectedIds);
+	expect((await t.run((ctx) => ctx.db.get("users", ids.user)))?.name).toBe("v");
+	check("deleteUser", (await t.mutation(MUTATIONS["deleteUser"]!, { user: ids.user })).affectedIds);
+	expect(await t.run((ctx) => ctx.db.get("users", ids.user))).toBe(null);
+	expect(await t.run((ctx) => ctx.db.get("users", ids.decoyUser))).not.toBe(null);
 });
 
 const fixtureMarker = makeFunctionReference<"mutation", Record<string, never>, { marker: number }>(
