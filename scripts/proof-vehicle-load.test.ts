@@ -1,10 +1,10 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import {
 	buildImportRows,
-	childEnvForImport,
 	computeNonEmptyTables,
 	importArgs,
 	legacyMessagesPresent,
@@ -12,6 +12,7 @@ import {
 	planImportPhases,
 	resolveImportTarget,
 	sanitizedImportError,
+	writeImportEnvFile,
 } from "./proof-vehicle-load";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp } from "../convex/proofVehicle/fixture";
@@ -157,10 +158,11 @@ test("resolveImportTarget rejects a missing admin key before any import", () => 
 });
 
 // I2d/KTD5: imports carry no credentials on argv and never --deployment
-// on the self-hosted path -- the target reaches the child via
-// childEnvForImport instead (P1 #5: argv is visible to `ps`).
-test("importArgs carries no credentials and no --deployment", () => {
-	const args = importArgs("rooms", "/tmp/rooms.jsonl", true);
+// on the self-hosted path -- the target reaches the child via a per-phase
+// env file (P1 #5: argv is visible to `ps`; a dotenv reload in the
+// loader's cwd would undo env-only transport).
+test("importArgs carries no credentials and pins the env file, without --deployment", () => {
+	const args = importArgs("rooms", "/tmp/rooms.jsonl", "/tmp/phases/convex-env", true);
 	expect(args).toEqual([
 		"convex",
 		"import",
@@ -168,6 +170,8 @@ test("importArgs carries no credentials and no --deployment", () => {
 		"rooms",
 		"--yes",
 		"--replace",
+		"--env-file",
+		"/tmp/phases/convex-env",
 		"/tmp/rooms.jsonl",
 	]);
 	expect(args).not.toContain("--deployment");
@@ -176,27 +180,18 @@ test("importArgs carries no credentials and no --deployment", () => {
 });
 
 test("importArgs omits --replace for non-replace phases", () => {
-	const args = importArgs("likes", "/tmp/likes.jsonl", false);
+	const args = importArgs("likes", "/tmp/likes.jsonl", "/tmp/phases/convex-env", false);
 	expect(args).not.toContain("--replace");
 	expect(args).not.toContain("--deployment");
 });
 
-test("childEnvForImport sets the self-hosted pair and strips project credentials", () => {
-	const env = childEnvForImport(
-		{ url: "http://127.0.0.1:3210", adminKey: "k" },
-		{
-			PATH: "/bin",
-			CONVEX_DEPLOYMENT: "stale-hosted",
-			CONVEX_DEPLOY_KEY: "stale-key",
-			CONVEX_DEPLOYMENT_TOKEN: "stale-token",
-		},
+test("writeImportEnvFile writes only the self-hosted pair", () => {
+	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-env-test-"));
+	const path = writeImportEnvFile(dir, { url: "http://127.0.0.1:3210", adminKey: "k" });
+	expect(path).toBe(join(dir, "convex-env"));
+	expect(readFileSync(path, "utf8")).toBe(
+		"CONVEX_SELF_HOSTED_URL=http://127.0.0.1:3210\nCONVEX_SELF_HOSTED_ADMIN_KEY=k\n",
 	);
-	expect(env["CONVEX_SELF_HOSTED_URL"]).toBe("http://127.0.0.1:3210");
-	expect(env["CONVEX_SELF_HOSTED_ADMIN_KEY"]).toBe("k");
-	expect(env["PATH"]).toBe("/bin");
-	expect("CONVEX_DEPLOYMENT" in env).toBe(false);
-	expect("CONVEX_DEPLOY_KEY" in env).toBe(false);
-	expect("CONVEX_DEPLOYMENT_TOKEN" in env).toBe(false);
 });
 
 test("sanitizedImportError omits the command and key but names table and status", () => {

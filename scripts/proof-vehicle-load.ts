@@ -36,16 +36,17 @@
  * A bare `npx convex env set` without that pair targets the CLI's own
  * default dev deployment instead, which can silently differ from CONVEX_URL.
  *
- * Key hygiene: each import child receives the admin key via its
- * environment (`CONVEX_SELF_HOSTED_ADMIN_KEY`), never on argv -- so the
- * key is invisible to `ps` and never lands in shell history from the
- * loader's own commands. Same-user environ reads (`/proc/<pid>/environ`)
- * can still see it during the seconds an import runs: treat a load host
- * as single-operator for its duration. The operator-typed commands in
- * this header authenticate the same way (env pair, no flags): export the
- * pair per session from a 0600 file or `read -s`, never paste the key
- * into tickets, chat, or an inline `VAR=value` command prefix.
- *
+ * Key hygiene: each import child reads the admin key from a per-phase env
+ * file (`--env-file` in the phase temp dir, mode 0600) instead of argv or
+ * the inherited environment -- so the key is invisible to `ps`, never
+ * lands in shell history from the loader's own commands, and cannot be
+ * reintroduced by a dotenv reload or stale export in the loader's cwd.
+ * Same-host file reads during the seconds an import runs remain possible:
+ * treat a load host as single-operator for its duration. The
+ * operator-typed commands in this header authenticate the same way (env
+ * pair, no flags): export the pair per session from a 0600 file or
+ * `read -s`, never paste the key into tickets, chat, or an inline
+ * `VAR=value` command prefix.
  * DO NOT point this at the same deployment `npm run dev` uses. rooms/users
  * import with `--replace`, which clears those tables entirely -- and
  * convex/chat.ts (the live tutorial chat app) reads/writes those same
@@ -165,11 +166,12 @@ export function buildImportRows(
 
 /**
  * Self-hosted import target (I2d/KTD5): the deployment's URL and admin
- * key, used for reads (ConvexHttpClient) and for each `npx convex import`
- * child's environment (see `childEnvForImport`). The explicit flag-based
- * path writes CONVEX_URL but removes CONVEX_DEPLOYMENT, and the Convex CLI
- * does not allow `--deployment` with self-hosted credentials -- so imports
- * carry the same URL and key instead of a deployment name.
+ * key, used for reads (ConvexHttpClient) and written per phase to the
+ * import child's env file (see `writeImportEnvFile`). The explicit
+ * flag-based path writes CONVEX_URL but removes CONVEX_DEPLOYMENT, and
+ * the Convex CLI does not allow `--deployment` with self-hosted
+ * credentials -- so imports carry the same URL and key instead of a
+ * deployment name.
  */
 export type ImportTarget = { url: string; adminKey: string };
 
@@ -197,41 +199,42 @@ export function resolveImportTarget(env: NodeJS.ProcessEnv): ImportTarget {
 
 /**
  * Builds one `npx convex import` argv (without the leading `npx`) for a
- * phase file. Carries no credentials: the target URL and admin key reach
- * the child via `childEnvForImport` instead of argv, so neither `ps` nor
- * the failure error text (see `sanitizedImportError`) can leak the key.
- * Extracted so the flag shape stays unit-testable without a live
+ * phase file. Carries no credentials: the child reads the target pair
+ * from the per-phase env file (`--env-file`) instead of argv, so neither
+ * `ps` nor the failure error text (see `sanitizedImportError`) can leak
+ * the key. Extracted so the flag shape stays unit-testable without a live
  * deployment -- the subprocess call itself cannot be.
  */
-export function importArgs(table: Phase["table"], file: string, replace: boolean): string[] {
+export function importArgs(
+	table: Phase["table"],
+	file: string,
+	envFile: string,
+	replace: boolean,
+): string[] {
 	const args = ["convex", "import", "--table", table, "--yes"];
 	if (replace) args.push("--replace");
+	args.push("--env-file", envFile);
 	args.push(file);
 	return args;
 }
 
 /**
- * Environment for one `npx convex import` child: the self-hosted pair the
- * Convex CLI resolves when no deployment-selection flags are present.
- * Project credential vars are stripped so a stale operator
- * export (e.g. a `CONVEX_DEPLOYMENT` left over from hosted work) cannot
- * divert the import or crash selection next to the self-hosted pair.
+ * Writes the self-hosted pair to a per-phase env file for one
+ * `npx convex import` child. The CLI resolves deployment selection from
+ * that file alone (no flags, and the inherited environment is not
+ * consulted for selection), so neither a dotenv reload in the loader's
+ * cwd (`.env.local` carrying a stale `CONVEX_DEPLOYMENT`) nor a stale
+ * exported credential var can divert or crash selection: the file is the
+ * single source of truth for that child.
  */
-export function childEnvForImport(
-	target: ImportTarget,
-	env: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-	const {
-		CONVEX_DEPLOYMENT: _deployment,
-		CONVEX_DEPLOY_KEY: _key,
-		CONVEX_DEPLOYMENT_TOKEN: _token,
-		...rest
-	} = env;
-	return {
-		...rest,
-		CONVEX_SELF_HOSTED_URL: target.url,
-		CONVEX_SELF_HOSTED_ADMIN_KEY: target.adminKey,
-	};
+export function writeImportEnvFile(dir: string, target: ImportTarget): string {
+	const path = join(dir, "convex-env");
+	writeFileSync(
+		path,
+		`CONVEX_SELF_HOSTED_URL=${target.url}\nCONVEX_SELF_HOSTED_ADMIN_KEY=${target.adminKey}\n`,
+		{ mode: 0o600 },
+	);
+	return path;
 }
 
 /**
@@ -268,17 +271,12 @@ function runConvexImport(
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
 	const file = join(dir, `${table}.jsonl`);
 	writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
-	const args = importArgs(table, file, replace);
+	const args = importArgs(table, file, writeImportEnvFile(dir, target), replace);
 	try {
 		// A stalled subprocess (network partition, stalled npx resolution,
 		// an interactive prompt this non-interactive caller can't answer)
 		// must not block the loader indefinitely: time out after 120s.
-		execFileSync("npx", args, {
-			stdio: "inherit",
-			timeout: 120_000,
-			killSignal: "SIGKILL",
-			env: childEnvForImport(target),
-		});
+		execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
 	} catch (error) {
 		throw sanitizedImportError(table, error);
 	} finally {
