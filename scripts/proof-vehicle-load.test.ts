@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import {
+	EPOCH_BASE_MS,
 	buildImportRows,
 	computeNonEmptyTables,
 	importArgs,
@@ -11,6 +12,7 @@ import {
 	naturalKey,
 	rowNaturalKey,
 	planImportPhases,
+	queryWithRetry,
 	resolveImportTarget,
 	sanitizedImportError,
 	writeImportEnvFile,
@@ -125,12 +127,45 @@ test("buildImportRows offsets messages' _creationTime from a fixed epoch base", 
 		["r", "room-real-id"],
 		["u", "user-real-id"],
 	]);
-	const phase = { table: "messages" as const, ops: corpus.vectors.V1.base.filter(
+	const messageOps = corpus.vectors.V1.base.filter(
 		(op): op is Extract<BaseOp, { op: "insertMessage" }> => op.op === "insertMessage",
-	) };
-	const [row] = buildImportRows(phase, idByLabel);
-	expect(typeof row!["_creationTime"]).toBe("number");
-	expect(row!["body"]).toBe("one");
+	);
+	expect(messageOps.length).toBeGreaterThan(0);
+	const phase = { table: "messages" as const, ops: messageOps };
+	const rows = buildImportRows(phase, idByLabel);
+	// Exact values, not just typeof number: dropping EPOCH_BASE_MS, using
+	// seconds, or stamping a constant would all pass a typeof check and
+	// silently unprove the deployment-side V4 tie.
+	expect(rows.map((row) => row["_creationTime"])).toEqual(
+		messageOps.map((op) => EPOCH_BASE_MS + op.creationTime),
+	);
+	expect(rows[0]!["body"]).toBe("one");
+});
+
+test("buildImportRows preserves V4's tied _creationTime values in phase order", () => {
+	// Through the same phase path main() uses: the messages phase arrives
+	// sorted ascending by creationTime (ties keep corpus order).
+	const messagesPhase = planImportPhases(corpus.vectors.V4.base as BaseOp[]).find(
+		(phase) => phase.table === "messages",
+	)!;
+	const labels = messagesPhase.ops.flatMap((op) =>
+		op.op === "insertMessage" ? [op.room, op.sender] : [],
+	);
+	const idByLabel = new Map([...new Set(labels)].map((label) => [label, `${label}-real-id`]));
+	const rows = buildImportRows(messagesPhase, idByLabel);
+	const times = rows.map((row) => row["_creationTime"] as number);
+	for (let i = 1; i < times.length; i++) {
+		expect(times[i]).toBeGreaterThanOrEqual(times[i - 1]!);
+	}
+	// The tied pair carries equal offsets with the corpus's m51-before-m50
+	// order preserved: collapsing the tie (or reordering it) breaks the
+	// deployment-side 50-row boundary proof.
+	const m50 = rows.find((row) => row["body"] === "message-m50")!["_creationTime"];
+	const m51 = rows.find((row) => row["body"] === "message-m51")!["_creationTime"];
+	expect(m50).toBe(m51);
+	expect(rows.findIndex((row) => row["body"] === "message-m51")).toBeLessThan(
+		rows.findIndex((row) => row["body"] === "message-m50"),
+	);
 });
 
 // I2d/KTD5: the self-hosted path resolves one URL + admin key target
@@ -268,4 +303,56 @@ test("shipped sources contain no --admin-key flag literal", () => {
 			rel,
 		).toEqual([]);
 	}
+});
+
+// #1: every deployment read goes through queryWithRetry -- a stalled
+// deployment must fail loudly with an attributed error, and a transient
+// blip must not abort the run.
+test("queryWithRetry returns the first-attempt value without retrying", async () => {
+	let calls = 0;
+	const value = await queryWithRetry("probe", () => {
+		calls++;
+		return Promise.resolve("ok");
+	});
+	expect(value).toBe("ok");
+	expect(calls).toBe(1);
+});
+
+test("queryWithRetry retries a transient failure then succeeds", async () => {
+	let calls = 0;
+	const value = await queryWithRetry(
+		"probe",
+		() => {
+			calls++;
+			return calls < 3 ? Promise.reject(new Error("blip")) : Promise.resolve("late-ok");
+		},
+		{ delayMs: 0 },
+	);
+	expect(value).toBe("late-ok");
+	expect(calls).toBe(3);
+});
+
+test("queryWithRetry throws a labeled error after exhausting attempts", async () => {
+	let calls = 0;
+	await expect(
+		queryWithRetry(
+			"preflight rooms",
+			() => {
+				calls++;
+				return Promise.reject(new Error("down"));
+			},
+			{ attempts: 2, delayMs: 0 },
+		),
+	).rejects.toThrow(/preflight rooms.*failed after 2 attempt\(s\).*down/);
+	expect(calls).toBe(2);
+});
+
+test("queryWithRetry times out a hanging read", async () => {
+	await expect(
+		queryWithRetry("read-back likes", () => new Promise<string>(() => {}), {
+			attempts: 1,
+			timeoutMs: 10,
+			delayMs: 0,
+		}),
+	).rejects.toThrow(/read-back likes.*timed out after 10ms/);
 });

@@ -117,6 +117,21 @@ async function likeTargetsExist(
 	return messageDoc !== null && userDoc !== null;
 }
 
+/**
+ * Idempotent like upsert shared by `addLike`, `membershipAndLikesTxn`,
+ * and the batch loop (#3): names the existing row for a (message, user)
+ * pair instead of inserting a duplicate. Callers own the dangling-target
+ * policy (throw vs skip) before calling -- this helper never decides it.
+ */
+async function ensureLike(
+	ctx: MutationCtx,
+	message: Id<"messages">,
+	user: Id<"users">,
+): Promise<Id<"likes">> {
+	const existing = await findLike(ctx, message, user);
+	return existing !== null ? existing._id : await ctx.db.insert("likes", { message, user });
+}
+
 // Adding a like is idempotent: when the (message, user) pair already has
 // a row, the ack names that row instead of inserting a duplicate.
 export const addLike = mutation({
@@ -129,11 +144,7 @@ export const addLike = mutation({
 		if (!(await likeTargetsExist(ctx, args.message, args.user))) {
 			throw new Error("addLike: message and user must both exist");
 		}
-		const existing = await findLike(ctx, args.message, args.user);
-		const like =
-			existing !== null
-				? existing._id
-				: await ctx.db.insert("likes", { message: args.message, user: args.user });
+		const like = await ensureLike(ctx, args.message, args.user);
 		return { affectedIds: { like }, marker: await bumpMarker(ctx) };
 	},
 });
@@ -154,8 +165,10 @@ export const removeLike = mutation({
  * V6: sets a membership's `active` flag and adds a like, in one atomic
  * mutation, so a subscriber can never observe one change without the
  * other (P3's single-write invariant, applied at the Convex source).
- * The like is idempotent like `addLike`, and throws on a dangling
- * message or user instead of writing an orphan.
+ * The like is idempotent like `addLike`, and throws -- before writing
+ * anything -- on a dangling message, user, or membership, or when the
+ * message lives outside the membership's room (the batch sibling's
+ * rules, mirrored so both mutations reject the same shapes).
  */
 export const membershipAndLikesTxn = mutation({
 	args: {
@@ -169,15 +182,26 @@ export const membershipAndLikesTxn = mutation({
 		marker: v.number(),
 	}),
 	handler: async (ctx, args) => {
-		if (!(await likeTargetsExist(ctx, args.message, args.user))) {
+		// Validate everything before writing anything (#6, #7): the same
+		// existence + same-room rules the batch sibling enforces, so both
+		// mutations reject the same shapes with matchable errors and a
+		// rejection leaves membership, likes, and the marker all untouched.
+		const [membershipDoc, messageDoc, userDoc] = await Promise.all([
+			ctx.db.get("memberships", args.membership),
+			ctx.db.get("messages", args.message),
+			ctx.db.get("users", args.user),
+		]);
+		if (messageDoc === null || userDoc === null) {
 			throw new Error("membershipAndLikesTxn: message and user must both exist");
 		}
+		if (membershipDoc === null) {
+			throw new Error("membershipAndLikesTxn: membership does not exist");
+		}
+		if (messageDoc.room !== membershipDoc.room) {
+			throw new Error("membershipAndLikesTxn: message must be in the membership's room");
+		}
 		await ctx.db.patch("memberships", args.membership, { active: args.active });
-		const existing = await findLike(ctx, args.message, args.user);
-		const like =
-			existing !== null
-				? existing._id
-				: await ctx.db.insert("likes", { message: args.message, user: args.user });
+		const like = await ensureLike(ctx, args.message, args.user);
 		return {
 			affectedIds: { membership: args.membership, like },
 			marker: await bumpMarker(ctx),
@@ -240,12 +264,7 @@ export const membershipAndLikesBatchTxn = mutation({
 		const likes = [];
 		for (const { like, messageDoc, userDoc } of targets) {
 			if (messageDoc === null || userDoc === null) continue;
-			const existing = await findLike(ctx, like.message, like.user);
-			likes.push(
-				existing !== null
-					? existing._id
-					: await ctx.db.insert("likes", { message: like.message, user: like.user }),
-			);
+			likes.push(await ensureLike(ctx, like.message, like.user));
 		}
 		return {
 			affectedIds: { membership: args.membership, likes },

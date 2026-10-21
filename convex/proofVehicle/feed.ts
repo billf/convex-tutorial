@@ -23,8 +23,10 @@ const feedRow = v.object({
  * `_id` leg is decisive per dataset but unpredictable across loads
  * (Convex assigns IDs randomly), so corpus goldens must not pin the
  * relative order of equal-`_creationTime` rows -- compare ties as sets.
+ * Exported so the tie-break leg itself is unit-testable: hermetic tests
+ * cannot reproduce equal `_creationTime` values through inserts.
  */
-function compareDesc(a: Doc<"messages">, b: Doc<"messages">): number {
+export function compareDesc(a: Doc<"messages">, b: Doc<"messages">): number {
 	if (a._creationTime !== b._creationTime) {
 		return b._creationTime - a._creationTime;
 	}

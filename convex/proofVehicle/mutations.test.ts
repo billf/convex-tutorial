@@ -393,6 +393,92 @@ test("membershipAndLikesTxn is idempotent on a repeated like", async () => {
 	expect(likes).toHaveLength(1);
 });
 
+test("membershipAndLikesTxn rejects an unknown membership without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	const doomedMembership = await t.run((ctx) =>
+		ctx.db.insert("memberships", { room, user, active: true }),
+	);
+	await t.run((ctx) => ctx.db.delete("memberships", doomedMembership));
+	const message = await t.run((ctx) =>
+		ctx.db.insert("messages", { room, sender: user, body: "hello" }),
+	);
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership: doomedMembership,
+			active: false,
+			message,
+			user,
+		}),
+	).rejects.toThrow(/does not exist/);
+
+	const stored = await t.run(async (ctx) => ({
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("membershipAndLikesTxn rejects a cross-room message without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const other = await t.run(async (ctx) => {
+		const otherRoom = await ctx.db.insert("rooms", { name: "other" });
+		const m2 = await ctx.db.insert("messages", { room: otherRoom, sender: user, body: "far" });
+		return { m2 };
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership,
+			active: false,
+			message: other.m2,
+			user,
+		}),
+	).rejects.toThrow(/membership's room/);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(true);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("membershipAndLikesTxn refuses dangling message targets without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const deadMessage = await t.run((ctx) =>
+		ctx.db.insert("messages", { room, sender: user, body: "gone" }),
+	);
+	await t.run((ctx) => ctx.db.delete("messages", deadMessage));
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(MUTATIONS.membershipAndLikesTxn!, {
+			membership,
+			active: false,
+			message: deadMessage,
+			user,
+		}),
+	).rejects.toThrow(/must both exist/);
+
+	const stored = await t.run(async (ctx) => ({
+		membership: await ctx.db.get("memberships", membership),
+		likes: await ctx.db.query("likes").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.membership?.active).toBe(true);
+	expect(stored.likes).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
 test("each mutation's acks name the rows it wrote", async () => {
 	const t = convexTest(schema, modules);
 	const idByLabel = await runLoadBase(t, corpus.vectors.V3.base as BaseOp[]);
@@ -467,6 +553,12 @@ test("V4's tied rows carry message-<bound label> bodies after the patch", async 
 	const before = await t.run((ctx) => ctx.db.get("messages", m50));
 	await t.mutation(patchMessageBody, { message: m50, body: "message-m50" });
 	const after = await t.run((ctx) => ctx.db.get("messages", m50));
+	const m51Row = await t.run((ctx) => ctx.db.get("messages", m51));
 	// A patch never touches _creationTime -- the tie's load-bearing invariant.
 	expect(after?._creationTime).toBe(before?._creationTime);
+	// ...but the test's title promises bodies: a patch writing the wrong
+	// body (swapped labels, empty string) while preserving timestamps must
+	// fail, since deployment-side row identification runs through bodies.
+	expect(after?.body).toBe("message-m50");
+	expect(m51Row?.body).toBe("message-m51");
 });

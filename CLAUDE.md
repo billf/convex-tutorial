@@ -91,7 +91,11 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
   traffic visible to `proofVehicle/feed:roomFeed`'s active-membership
   filter. `scripts/proof-vehicle-load.ts` loads a corpus vector into a real
   deployment (see the Commands section above); it has not been run
-  end-to-end in this environment.
+  end-to-end in this environment (unit-tested only; end-to-end proof is the
+  U11 snapshot reference run). On V4's tie it preserves the corpus's order
+  and equal `_creationTime` offsets but does not determine the tied pair's
+  order -- proving the literal m51-before-m50 order is U11's job (see the
+  script header NOTE for the full statement).
 - `_generated/` is Convex codegen (`api.d.ts`, `dataModel.d.ts`, server
   helpers) — regenerated automatically by `convex dev`; don't hand-edit it.
   `_generated/ai/` is the separate ai-files vendor output described above.

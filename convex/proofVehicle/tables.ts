@@ -34,6 +34,20 @@ export const likes = query({
 });
 
 /**
+ * Unvalidated `messages` read for KTD8's legacy guard. On a pre-migration
+ * deployment the rows lack `room`/`sender`, so the typed `messages` query
+ * above throws a returns-validation error before the loader's
+ * `legacyMessagesPresent` can inspect them -- the documented
+ * `legacy-messages-present` abort would be unreachable. This raw shape
+ * lets the loader see those rows and abort with the intended error.
+ */
+export const messagesRaw = query({
+	args: {},
+	returns: v.array(v.any()),
+	handler: async (ctx) => ctx.db.query("messages").collect(),
+});
+
+/**
  * The harness-only marker sequence row (KTD4), for separate-session
  * sources that cannot read a mutation's own commit timestamp. `null`
  * before `proofVehicle/fixture:marker` first runs. Resolves "latest" with

@@ -67,12 +67,15 @@
  * (nothing else calling chat:sendMessage/getOrCreateUser or the
  * proofVehicle mutations) for its duration.
  *
- * NOTE: V1 has been run against a live self-hosted deployment in this
- * environment (local backend on 127.0.0.1:3210, using the I2d CONVEX_URL /
- * PROOF_VEHICLE_ADMIN_KEY path); its phased-import and label-binding
- * logic is further exercised structurally by this file's own unit tests
- * below the CLI entrypoint, and its end-to-end proof -- like V4's
- * literal ID tie -- is the snapshot reference run (U11).
+ * NOTE (one true story, mirrored in AGENTS.md): this loader has not been
+ * run end-to-end in this environment; its phased-import and label-binding
+ * logic is exercised structurally by this file's own unit tests below the
+ * CLI entrypoint, and end-to-end proof is the snapshot reference run
+ * (U11). On V4's tie: this script preserves the corpus's relative order
+ * and stamps equal `_creationTime` offsets for tied rows -- the raw
+ * material a tie proof needs -- but it does NOT determine the tied pair's
+ * order (Convex assigns real IDs randomly), so proving the literal
+ * m51-before-m50 order is U11's job, not this script's.
  */
 
 import { execFileSync } from "node:child_process";
@@ -84,7 +87,7 @@ import { makeFunctionReference } from "convex/server";
 import corpus from "../convex/proofVehicle/corpus/v1.json";
 import type { BaseOp } from "../convex/proofVehicle/fixture";
 
-const EPOCH_BASE_MS = Date.parse("2026-01-01T00:00:00Z");
+export const EPOCH_BASE_MS = Date.parse("2026-01-01T00:00:00Z");
 
 /**
  * KTD8's precondition: a deployment loader must abort rather than write
@@ -131,8 +134,10 @@ export function planImportPhases(ops: readonly BaseOp[]): Phase[] {
  * phase). Messages additionally carry an explicit `_creationTime`, offset
  * from a fixed epoch base by the corpus's own declared value in
  * milliseconds -- this is the one part of the corpus's timing convex-test
- * cannot reproduce (see fixture.ts's `loadBaseIntoConvexTest`), which is
- * exactly why this loader, not convex-test, is what proves V4's tie.
+ * cannot reproduce (see fixture.ts's `loadBaseIntoConvexTest`). Preserving
+ * exact offsets (and equal values for ties) is the raw material V4's tie
+ * proof needs; determining the tied pair's order is U11's job (see the
+ * header NOTE), not this function's.
  */
 export function buildImportRows(
 	phase: Phase,
@@ -144,23 +149,16 @@ export function buildImportRows(
 		return id;
 	};
 	return phase.ops.map((op) => {
-		switch (op.op) {
-			case "insertRoom":
-				return { name: op.name };
-			case "insertUser":
-				return { name: op.name };
-			case "insertMembership":
-				return { room: resolve(op.room), user: resolve(op.user), active: op.active };
-			case "insertMessage":
-				return {
-					room: resolve(op.room),
-					sender: resolve(op.sender),
-					body: op.body,
-					_creationTime: EPOCH_BASE_MS + op.creationTime,
-				};
-			case "insertLike":
-				return { message: resolve(op.message), user: resolve(op.user) };
-		}
+		// Label resolution lives in one place (#4): opTableAndFields maps
+		// each op to its table plus fully-resolved import fields, and
+		// naturalKey selects the key subset from that same map -- a field
+		// added for one consumer reaches the other through the shared
+		// switch, never through a parallel copy. Only the import-only
+		// `_creationTime` is added here.
+		const [, fields] = opTableAndFields(op, resolve);
+		return op.op === "insertMessage"
+			? { ...fields, _creationTime: EPOCH_BASE_MS + op.creationTime }
+			: fields;
 	});
 }
 
@@ -262,6 +260,63 @@ export function sanitizedImportError(table: Phase["table"], error: unknown): Err
 	);
 }
 
+/**
+ * Runs one deployment read with a deadline and bounded retries. Every
+ * `client.query` in `main` and `readBackLabels` goes through here: a
+ * stalled deployment must fail loudly (not hang the loader forever), and
+ * a single transient blip must not abort the whole run into the manual
+ * reset-and-rerun path. Retries use linear backoff (`delayMs * attempt`).
+ * The label names the read (phase/table) so the thrown error attributes
+ * a failure to the step that owns it.
+ */
+// NOTE: executor form, not Promise.withResolvers -- the repo pins
+// TypeScript ~5.0, whose lib predates withResolvers (TS 5.2+).
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+	});
+	const guarded = promise.then(
+		(value) => {
+			clearTimeout(timer);
+			return value;
+		},
+		(error) => {
+			clearTimeout(timer);
+			throw error;
+		},
+	);
+	// The race loser may reject after the winner settles; a handler must
+	// be attached or Node reports an unhandled rejection.
+	void guarded.catch(() => {});
+	return Promise.race([guarded, timeout]);
+}
+
+export async function queryWithRetry<T>(
+	label: string,
+	run: () => Promise<T>,
+	opts?: { attempts?: number; timeoutMs?: number; delayMs?: number },
+): Promise<T> {
+	const attempts = Math.max(1, opts?.attempts ?? 3);
+	const timeoutMs = opts?.timeoutMs ?? 30_000;
+	const delayMs = opts?.delayMs ?? 1_000;
+	let lastError: unknown;
+	for (let attempt = 1; attempt <= attempts; attempt++) {
+		try {
+			return await withTimeout(run(), timeoutMs, label);
+		} catch (error) {
+			lastError = error;
+			if (attempt < attempts) await sleep(delayMs * attempt);
+		}
+	}
+	const detail = lastError instanceof Error ? lastError.message : String(lastError);
+	throw new Error(`${label}: deployment read failed after ${attempts} attempt(s) (${detail})`);
+}
+
 function runConvexImport(
 	table: Phase["table"],
 	rows: Record<string, unknown>[],
@@ -269,16 +324,23 @@ function runConvexImport(
 	target: ImportTarget,
 ): void {
 	const dir = mkdtempSync(join(tmpdir(), "proof-vehicle-load-"));
-	const file = join(dir, `${table}.jsonl`);
-	writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
-	const args = importArgs(table, file, writeImportEnvFile(dir, target), replace);
+	// Every write below lands inside `dir` (including the env file
+	// carrying the admin key), so all of them run inside the try whose
+	// finally removes the directory: a throwing write cannot leave the
+	// secret behind. `mkdtempSync` itself stays outside -- if it throws,
+	// no directory (and no secret) exists yet.
 	try {
-		// A stalled subprocess (network partition, stalled npx resolution,
-		// an interactive prompt this non-interactive caller can't answer)
-		// must not block the loader indefinitely: time out after 120s.
-		execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
-	} catch (error) {
-		throw sanitizedImportError(table, error);
+		const file = join(dir, `${table}.jsonl`);
+		writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+		const args = importArgs(table, file, writeImportEnvFile(dir, target), replace);
+		try {
+			// A stalled subprocess (network partition, stalled npx resolution,
+			// an interactive prompt this non-interactive caller can't answer)
+			// must not block the loader indefinitely: time out after 120s.
+			execFileSync("npx", args, { stdio: "inherit", timeout: 120_000, killSignal: "SIGKILL" });
+		} catch (error) {
+			throw sanitizedImportError(table, error);
+		}
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -288,8 +350,10 @@ function runConvexImport(
  * Per-table natural-key fields, shared by corpus ops (`naturalKey`) and
  * read-back rows (`rowNaturalKey`): rooms/users by `name`, messages by
  * `body` (the corpus never repeats a body within one vector), and
- * memberships/likes by their foreign-key pair. Edit this map -- not two
- * switches -- when the key shape changes.
+ * memberships/likes by their foreign-key pair. `opTableAndFields` is the
+ * single switch that resolves labels; this map only selects the key
+ * subset from its output. Edit the switch when the field shape changes,
+ * this map when the key shape changes.
  */
 const TABLE_NATURAL_KEY_FIELDS = {
 	rooms: ["name"],
@@ -313,9 +377,16 @@ function opTableAndFields(
 		case "insertUser":
 			return ["users", { name: op.name }];
 		case "insertMessage":
-			return ["messages", { body: op.body }];
+			// Full import fields (not just the natural-key body):
+			// `naturalKey` selects its key subset from this same map via
+			// TABLE_NATURAL_KEY_FIELDS, and `buildImportRows` adds only the
+			// import-only `_creationTime` on top.
+			return [
+				"messages",
+				{ room: resolve(op.room), sender: resolve(op.sender), body: op.body },
+			];
 		case "insertMembership":
-			return ["memberships", { room: resolve(op.room), user: resolve(op.user) }];
+			return ["memberships", { room: resolve(op.room), user: resolve(op.user), active: op.active }];
 		case "insertLike":
 			return ["likes", { message: resolve(op.message), user: resolve(op.user) }];
 	}
@@ -347,7 +418,7 @@ async function readBackLabels(
 		Record<string, never>,
 		({ _id: string } & Record<string, unknown>)[]
 	>(`proofVehicle/tables:${phase.table}`);
-	const rows = await client.query(ref, {});
+	const rows = await queryWithRetry(`read-back ${phase.table}`, () => client.query(ref, {}));
 	const idByNaturalKey = new Map(rows.map((row) => [rowNaturalKey(phase.table, row), row._id]));
 	const resolved = new Map<string, string>();
 	for (const op of phase.ops) {
@@ -403,11 +474,13 @@ async function main(): Promise<void> {
 	const url = target.url;
 	const client = new ConvexHttpClient(url);
 
-	const existingMessages = await client.query(
-		makeFunctionReference<"query", Record<string, never>, Record<string, unknown>[]>(
-			"proofVehicle/tables:messages",
+	const existingMessages = await queryWithRetry("preflight messages", () =>
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, Record<string, unknown>[]>(
+				"proofVehicle/tables:messagesRaw",
+			),
+			{},
 		),
-		{},
 	);
 	if (legacyMessagesPresent(existingMessages)) {
 		throw new Error(
@@ -437,23 +510,37 @@ async function main(): Promise<void> {
 	// Independent preflight reads: fetch concurrently, then apply the
 	// same guard predicate to the same keyed inputs.
 	const [rooms, users, memberships, likes] = await Promise.all([
-		client.query(
-			makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:rooms"),
-			{},
-		),
-		client.query(
-			makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:users"),
-			{},
-		),
-		client.query(
-			makeFunctionReference<"query", Record<string, never>, unknown[]>(
-				"proofVehicle/tables:memberships",
+		queryWithRetry("preflight rooms", () =>
+			client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					"proofVehicle/tables:rooms",
+				),
+				{},
 			),
-			{},
 		),
-		client.query(
-			makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
-			{},
+		queryWithRetry("preflight users", () =>
+			client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					"proofVehicle/tables:users",
+				),
+				{},
+			),
+		),
+		queryWithRetry("preflight memberships", () =>
+			client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					"proofVehicle/tables:memberships",
+				),
+				{},
+			),
+		),
+		queryWithRetry("preflight likes", () =>
+			client.query(
+				makeFunctionReference<"query", Record<string, never>, unknown[]>(
+					"proofVehicle/tables:likes",
+				),
+				{},
+			),
 		),
 	]);
 	const nonEmptyTables = computeNonEmptyTables({
@@ -489,11 +576,13 @@ async function main(): Promise<void> {
 		// the window from "the whole script's runtime" to "between this
 		// check and the next subprocess call".
 		if (replace) {
-			const rows = await client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>(
-					`proofVehicle/tables:${phase.table}`,
+			const rows = await queryWithRetry(`recheck ${phase.table}`, () =>
+				client.query(
+					makeFunctionReference<"query", Record<string, never>, unknown[]>(
+						`proofVehicle/tables:${phase.table}`,
+					),
+					{},
 				),
-				{},
 			);
 			if (rows.length > 0) {
 				throw new Error(

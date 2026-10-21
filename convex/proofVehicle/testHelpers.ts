@@ -25,20 +25,78 @@ function mutationRef(name: string) {
 	return makeFunctionReference<"mutation", Record<string, unknown>, Ack>(name);
 }
 
-export const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
-	sendMessage: mutationRef("proofVehicle/mutations:sendMessage"),
-	updateMessageBody: mutationRef("proofVehicle/mutations:updateMessageBody"),
-	deleteMessage: mutationRef("proofVehicle/mutations:deleteMessage"),
-	renameUser: mutationRef("proofVehicle/mutations:renameUser"),
-	deleteUser: mutationRef("proofVehicle/mutations:deleteUser"),
-	setMembershipActive: mutationRef("proofVehicle/mutations:setMembershipActive"),
-	addLike: mutationRef("proofVehicle/mutations:addLike"),
-	removeLike: mutationRef("proofVehicle/mutations:removeLike"),
-	membershipAndLikesTxn: mutationRef("proofVehicle/mutations:membershipAndLikesTxn"),
-	membershipAndLikesBatchTxn: mutationRef("proofVehicle/mutations:membershipAndLikesBatchTxn"),
+type MutationTestMeta = {
+	bindKey: string;
+	idArgKeys: readonly string[];
+	nestedIdArgKeys?: Record<string, readonly string[]>;
 };
-// One descriptor per mutation for the delta-test harness, covering both
-// formulation sites that must agree per mutation:
+
+/**
+ * The single per-mutation registry (#10): the Convex function path plus
+ * the delta-harness metadata that must agree with it. `MUTATIONS` and
+ * `MUTATION_TEST_META` below are both derived from this one table, so
+ * adding a mutation is a single entry here instead of parallel copies
+ * whose keys can silently drift apart.
+ */
+const MUTATION_DEFS = {
+	sendMessage: {
+		ref: "proofVehicle/mutations:sendMessage",
+		bindKey: "message",
+		idArgKeys: ["room", "sender"],
+	},
+	updateMessageBody: {
+		ref: "proofVehicle/mutations:updateMessageBody",
+		bindKey: "message",
+		idArgKeys: ["message"],
+	},
+	deleteMessage: {
+		ref: "proofVehicle/mutations:deleteMessage",
+		bindKey: "message",
+		idArgKeys: ["message"],
+	},
+	renameUser: {
+		ref: "proofVehicle/mutations:renameUser",
+		bindKey: "user",
+		idArgKeys: ["user"],
+	},
+	deleteUser: {
+		ref: "proofVehicle/mutations:deleteUser",
+		bindKey: "user",
+		idArgKeys: ["user"],
+	},
+	setMembershipActive: {
+		ref: "proofVehicle/mutations:setMembershipActive",
+		bindKey: "membership",
+		idArgKeys: ["membership"],
+	},
+	addLike: {
+		ref: "proofVehicle/mutations:addLike",
+		bindKey: "like",
+		idArgKeys: ["message", "user"],
+	},
+	removeLike: {
+		ref: "proofVehicle/mutations:removeLike",
+		bindKey: "like",
+		idArgKeys: ["like"],
+	},
+	membershipAndLikesTxn: {
+		ref: "proofVehicle/mutations:membershipAndLikesTxn",
+		bindKey: "like",
+		idArgKeys: ["membership", "message", "user"],
+	},
+	membershipAndLikesBatchTxn: {
+		ref: "proofVehicle/mutations:membershipAndLikesBatchTxn",
+		bindKey: "membership",
+		idArgKeys: ["membership"],
+		nestedIdArgKeys: { likes: ["message", "user"] },
+	},
+} as const satisfies Record<string, { ref: string } & MutationTestMeta>;
+
+export const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = Object.fromEntries(
+	Object.entries(MUTATION_DEFS).map(([name, def]) => [name, mutationRef(def.ref)]),
+);
+// One descriptor per mutation for the delta-test harness, derived from
+// MUTATION_DEFS above (single source of truth). The fields:
 // - `bindKey`: the affectedIds key a delta's `label` should bind to.
 //   Needed because Convex's returns validator does not promise to preserve
 //   the handler's object-literal key order (membershipAndLikesTxn's
@@ -61,25 +119,9 @@ export const MUTATIONS: Record<string, ReturnType<typeof mutationRef>> = {
 // name a batch-created like, and chained deltas off batch likes are
 // inexpressible in this harness today. Name batch-created likes by
 // querying them back (as the direct batch tests do), not by label.
-export const MUTATION_TEST_META: Record<
-	string,
-	{ bindKey: string; idArgKeys: readonly string[]; nestedIdArgKeys?: Record<string, readonly string[]> }
-> = {
-	sendMessage: { bindKey: "message", idArgKeys: ["room", "sender"] },
-	updateMessageBody: { bindKey: "message", idArgKeys: ["message"] },
-	deleteMessage: { bindKey: "message", idArgKeys: ["message"] },
-	renameUser: { bindKey: "user", idArgKeys: ["user"] },
-	deleteUser: { bindKey: "user", idArgKeys: ["user"] },
-	setMembershipActive: { bindKey: "membership", idArgKeys: ["membership"] },
-	addLike: { bindKey: "like", idArgKeys: ["message", "user"] },
-	removeLike: { bindKey: "like", idArgKeys: ["like"] },
-	membershipAndLikesTxn: { bindKey: "like", idArgKeys: ["membership", "message", "user"] },
-	membershipAndLikesBatchTxn: {
-		bindKey: "membership",
-		idArgKeys: ["membership"],
-		nestedIdArgKeys: { likes: ["message", "user"] },
-	},
-};
+export const MUTATION_TEST_META: Record<string, MutationTestMeta> = Object.fromEntries(
+	Object.entries(MUTATION_DEFS).map(([name, { ref: _ref, ...meta }]) => [name, meta]),
+);
 export type CorpusOutRow = {
 	id: string;
 	creationTime: number;
@@ -207,3 +249,8 @@ export const fixtureReset = makeFunctionReference<"mutation", Record<string, nev
 	"proofVehicle/fixture:reset",
 );
 export const patchMessageBody = mutationRef("proofVehicle/fixture:patchMessageBody");
+
+// Re-exported for the V4 tie-break unit pin (see proofVehicle.test.ts):
+// hermetic tests cannot reproduce equal `_creationTime` rows through
+// inserts, so the comparator leg is tested directly instead.
+export { compareDesc } from "./feed";

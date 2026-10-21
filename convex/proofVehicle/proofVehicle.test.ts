@@ -15,6 +15,7 @@ import {
 	fixtureMarker,
 	feedFor,
 	seedRoomWithMember,
+	compareDesc,
 	type CorpusOutRow,
 } from "./testHelpers";
 
@@ -45,6 +46,12 @@ const markers = makeFunctionReference<
 	Record<string, never>,
 	{ _id: Id<"proofVehicleMarkers">; _creationTime: number; sequence: number } | null
 >("proofVehicle/tables:markers");
+
+const messagesRaw = makeFunctionReference<
+	"query",
+	Record<string, never>,
+	Record<string, unknown>[]
+>("proofVehicle/tables:messagesRaw");
 
 test("the oracle excludes a message whose sender has no membership row", async () => {
 	const t = convexTest(schema, modules);
@@ -262,6 +269,20 @@ test("allSelectedRows returns every row, each tagged with its table, including t
 	expect(rows.find((row) => row.table === "marker")?.doc.sequence).toBe(1);
 });
 
+// KTD8 legacy guard (#13): the loader's preflight reads messages through
+// this unvalidated shape so pre-migration rows (missing `room`) reach
+// `legacyMessagesPresent` instead of dying in returns validation. Pinned
+// here: the query returns whatever rows exist, typed or not.
+test("tables:messagesRaw returns message rows without returns validation", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	await t.run((ctx) => ctx.db.insert("messages", { room, sender: user, body: "hi" }));
+
+	const rows = await t.query(messagesRaw, {});
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatchObject({ room, sender: user, body: "hi" });
+});
+
 
 for (const key of ["V1", "V2", "V3", "V6"] as const) {
 	const vector = corpus.vectors[key];
@@ -311,6 +332,31 @@ test("V4 (exact 50-row boundary and ID tie): the excluded 51st row and the inclu
 	// The literal m51-before-m50 tie-break order is deployment-
 	// nondeterministic (Convex assigns IDs randomly); U11 must compare the
 	// tied pair as a set, per the corpus vector's own "note" field.
+});
+
+// #9: the V4 inclusion check above compares as a Set, so the `_id`
+// tie-break leg of the canonical order had no hermetic cover -- inverting
+// or deleting it kept the suite green. Pinned here directly: hermetic
+// inserts cannot produce equal `_creationTime` rows, so the tie is forced
+// by spreading real rows with an overridden timestamp.
+test("compareDesc orders equal-_creationTime rows by descending _id, time first", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	const [docA, docB] = await t.run(async (ctx) => {
+		const a = await ctx.db.insert("messages", { room, sender: user, body: "a" });
+		const b = await ctx.db.insert("messages", { room, sender: user, body: "b" });
+		return [await ctx.db.get("messages", a), await ctx.db.get("messages", b)];
+	});
+	const tiedA = { ...docA!, _creationTime: 100 };
+	const tiedB = { ...docB!, _creationTime: 100 };
+	// The leg is decisive and pinned against an independent reference
+	// sort: a flipped comparison (or a dropped leg) disagrees here.
+	expect([tiedA, tiedB].sort(compareDesc)).toEqual(
+		[tiedA, tiedB].sort((a, b) => (a._id > b._id ? -1 : a._id < b._id ? 1 : 0)),
+	);
+	// Time still dominates the _id leg.
+	const newer = { ...docA!, _creationTime: 200 };
+	expect([tiedB, newer].sort(compareDesc)[0]!._id).toBe(newer._id);
 });
 
 test("V5 (deletes): each independent delta, applied to a fresh copy of the base, matches its own expected output", async () => {
