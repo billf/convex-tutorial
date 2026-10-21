@@ -1,4 +1,4 @@
-import { readFileSync, mkdtempSync } from "node:fs";
+import { readFileSync, mkdtempSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import {
 	importArgs,
 	legacyMessagesPresent,
 	naturalKey,
+	rowNaturalKey,
 	planImportPhases,
 	resolveImportTarget,
 	sanitizedImportError,
@@ -192,6 +193,41 @@ test("writeImportEnvFile writes only the self-hosted pair", () => {
 	expect(readFileSync(path, "utf8")).toBe(
 		"CONVEX_SELF_HOSTED_URL=http://127.0.0.1:3210\nCONVEX_SELF_HOSTED_ADMIN_KEY=k\n",
 	);
+	expect(statSync(path).mode & 0o777).toBe(0o600);
+});
+
+test("rowNaturalKey agrees with naturalKey on every table shape", () => {
+	const idByLabel = new Map([
+		["r", "room-1"],
+		["a", "user-1"],
+		["m", "msg-1"],
+	]);
+	const cases: {
+		op: BaseOp;
+		table: "rooms" | "users" | "memberships" | "messages" | "likes";
+		row: Record<string, unknown>;
+	}[] = [
+		{ op: { op: "insertRoom", label: "r", name: "room" }, table: "rooms", row: { name: "room" } },
+		{ op: { op: "insertUser", label: "a", name: "Ada" }, table: "users", row: { name: "Ada" } },
+		{
+			op: { op: "insertMembership", label: "x", room: "r", user: "a", active: true },
+			table: "memberships",
+			row: { room: "room-1", user: "user-1", active: true },
+		},
+		{
+			op: { op: "insertMessage", label: "m", room: "r", sender: "a", body: "hi", creationTime: 1 },
+			table: "messages",
+			row: { room: "room-1", sender: "user-1", body: "hi" },
+		},
+		{
+			op: { op: "insertLike", label: "l", message: "m", user: "a" },
+			table: "likes",
+			row: { message: "msg-1", user: "user-1" },
+		},
+	];
+	for (const { op, table, row } of cases) {
+		expect(rowNaturalKey(table, row), table).toBe(naturalKey(op, idByLabel));
+	}
 });
 
 test("sanitizedImportError omits the command and key but names table and status", () => {

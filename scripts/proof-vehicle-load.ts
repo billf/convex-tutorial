@@ -285,42 +285,56 @@ function runConvexImport(
 }
 
 /**
- * A natural key for each table's ops, unique enough within one vector's
- * base state to bind a read-back row to its corpus label: rooms/users by
- * `name`, messages by `body` (the corpus never repeats a body within one
- * vector), and memberships/likes by their foreign-key pair (the shared
- * contract guarantees at most one membership per (room, user); no corpus
- * vector's *base* state repeats a (message, user) like pair, even though
- * V6's delta later adds a second one via a mutation call that returns its
- * own id directly, needing no read-back).
+ * Per-table natural-key fields, shared by corpus ops (`naturalKey`) and
+ * read-back rows (`rowNaturalKey`): rooms/users by `name`, messages by
+ * `body` (the corpus never repeats a body within one vector), and
+ * memberships/likes by their foreign-key pair. Edit this map -- not two
+ * switches -- when the key shape changes.
  */
-export function naturalKey(op: BaseOp, idByLabel: ReadonlyMap<string, string>): string {
-	const resolve = (label: string) => idByLabel.get(label) ?? label;
+const TABLE_NATURAL_KEY_FIELDS = {
+	rooms: ["name"],
+	users: ["name"],
+	memberships: ["room", "user"],
+	messages: ["body"],
+	likes: ["message", "user"],
+} as const satisfies Record<Phase["table"], readonly string[]>;
+
+function joinKey(table: Phase["table"], getField: (field: string) => unknown): string {
+	return TABLE_NATURAL_KEY_FIELDS[table].map((field) => String(getField(field))).join("/");
+}
+
+function opTableAndFields(
+	op: BaseOp,
+	resolve: (label: string) => string,
+): [Phase["table"], Record<string, unknown>] {
 	switch (op.op) {
 		case "insertRoom":
+			return ["rooms", { name: op.name }];
 		case "insertUser":
-			return op.name;
+			return ["users", { name: op.name }];
 		case "insertMessage":
-			return op.body;
+			return ["messages", { body: op.body }];
 		case "insertMembership":
-			return `${resolve(op.room)}/${resolve(op.user)}`;
+			return ["memberships", { room: resolve(op.room), user: resolve(op.user) }];
 		case "insertLike":
-			return `${resolve(op.message)}/${resolve(op.user)}`;
+			return ["likes", { message: resolve(op.message), user: resolve(op.user) }];
 	}
 }
 
-function rowNaturalKey(table: Phase["table"], row: Record<string, unknown>): string {
-	switch (table) {
-		case "rooms":
-		case "users":
-			return String(row["name"]);
-		case "messages":
-			return String(row["body"]);
-		case "memberships":
-			return `${String(row["room"])}/${String(row["user"])}`;
-		case "likes":
-			return `${String(row["message"])}/${String(row["user"])}`;
-	}
+/**
+ * A natural key for each table's ops, unique enough within one vector's
+ * base state to bind a read-back row to its corpus label. Field selection
+ * lives in `TABLE_NATURAL_KEY_FIELDS`; this only resolves labels.
+ */
+export function naturalKey(op: BaseOp, idByLabel: ReadonlyMap<string, string>): string {
+	const resolve = (label: string) => idByLabel.get(label) ?? label;
+	const [table, fields] = opTableAndFields(op, resolve);
+	return joinKey(table, (field) => fields[field]);
+}
+
+/** The same key for a read-back row: must stay identical to `naturalKey` for the same logical row. */
+export function rowNaturalKey(table: Phase["table"], row: Record<string, unknown>): string {
+	return joinKey(table, (field) => row[field]);
 }
 
 async function readBackLabels(
