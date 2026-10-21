@@ -44,9 +44,10 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
   deployment (see `scripts/proof-vehicle-load.ts`'s own header for
   required env vars). **Never point this at the deployment `npm run dev`
   uses** — it refuses to run against any deployment where
-  rooms/users/memberships/messages/likes already has rows, specifically
-  because rooms/users import with `--replace` and those are the same
-  tables this app's own chat functions read and write.
+  rooms/users/memberships/messages/likes already has rows. Every phase
+  imports with require-empty semantics (no `--replace` anywhere), since
+  rooms/users are the same tables this app's own chat functions read
+  and write.
 
 ## Architecture
 

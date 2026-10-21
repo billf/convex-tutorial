@@ -150,7 +150,7 @@
 				}
 			],
 			"expectedAfterDelta": [
-				null,
+				[],
 				[
 					{
 						"id": "b1",
@@ -275,7 +275,19 @@
 						"likeCount": 0
 					}
 				],
-				null,
+				[
+					{
+						"id": "a1",
+						"creationTime": 30,
+						"room": "r",
+						"body": "liked",
+						"sender": {
+							"id": "a",
+							"name": "Ada"
+						},
+						"likeCount": 1
+					}
+				],
 				[
 					{
 						"id": "a1",

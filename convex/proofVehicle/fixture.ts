@@ -15,15 +15,21 @@ import type { BaseOp, PhaseTable } from "./basePlan";
 
 export type { BaseOp } from "./basePlan";
 
-/** Bumps the single `proofVehicleMarkers` row, creating it on first use. */
+/**
+ * Bumps the single `proofVehicleMarkers` row, creating it on first use.
+ * Reads the most recent row rather than asserting exactly one, mirroring
+ * `proofVehicle/tables:markers`: two racing `marker()` calls (or a
+ * leftover double-run row) must degrade to "latest" instead of bricking
+ * every mutation with a `.unique()` throw.
+ */
 export async function bumpMarker(ctx: MutationCtx): Promise<number> {
-	const existing = await ctx.db.query("proofVehicleMarkers").unique();
-	if (existing === null) {
+	const [latest] = await ctx.db.query("proofVehicleMarkers").order("desc").take(1);
+	if (latest === undefined) {
 		await ctx.db.insert("proofVehicleMarkers", { sequence: 1 });
 		return 1;
 	}
-	const sequence = existing.sequence + 1;
-	await ctx.db.patch("proofVehicleMarkers", existing._id, { sequence });
+	const sequence = latest.sequence + 1;
+	await ctx.db.patch("proofVehicleMarkers", latest._id, { sequence });
 	return sequence;
 }
 
@@ -67,7 +73,11 @@ export const reset = internalMutation({
 	handler: async (ctx) => {
 		if (process.env.PROOF_VEHICLE_FIXTURE !== "1") {
 			throw new Error(
-				'proofVehicle/fixture:reset refused: set the deployment env var PROOF_VEHICLE_FIXTURE to "1" first (npx convex env set PROOF_VEHICLE_FIXTURE 1).',
+				'proofVehicle/fixture:reset refused: set the deployment env var PROOF_VEHICLE_FIXTURE to "1" ' +
+					"on the target deployment first (with the same self-hosted URL/key binding the reset call " +
+					`uses, e.g. CONVEX_SELF_HOSTED_URL="$CONVEX_URL" ` +
+					'CONVEX_SELF_HOSTED_ADMIN_KEY="$PROOF_VEHICLE_ADMIN_KEY" npx convex env set PROOF_VEHICLE_FIXTURE 1). ' +
+					"A bare `npx convex env set` targets the CLI's own default dev deployment, not the target.",
 			);
 		}
 		for (const table of PROOF_VEHICLE_TABLES) {
@@ -114,8 +124,10 @@ function resolve(table: PhaseTable, maps: LabelMaps, label: string): Id<TableNam
  * same plan the deployment loader executes: rooms/users (order-
  * independent), then memberships, then messages in ascending
  * `creationTime` order, then likes. Labels resolve out of per-table maps,
- * so a room and a user may share a label without colliding, and a lookup
- * returns the table's own id type with no cast.
+ * so a lookup returns the table's own id type with no cast -- but the
+ * returned map keys by bare label, so reusing one label across tables
+ * throws instead of silently overwriting: labels must be unique across
+ * all five tables in one vector.
  *
  * `ctx.db.insert` has no way to set an explicit `_creationTime` (unlike the
  * deployment loader's phased `npx convex import`, which can), so this
@@ -173,12 +185,22 @@ export async function loadBaseIntoConvexTest(
 			}
 		}
 	}
-	return new Map<string, Id<TableNames>>([
-		...maps.rooms,
-		...maps.users,
-		...maps.memberships,
-		...maps.messages,
-		...maps.likes,
-	]);
+	// The merged map keys by bare label, so one label reused across tables
+	// would silently overwrite another table's binding. Labels must be
+	// unique across all five tables in one vector; fail loudly instead of
+	// mis-binding.
+	const idByLabel = new Map<string, Id<TableNames>>();
+	for (const [table, map] of Object.entries(maps) as [PhaseTable, Map<string, Id<TableNames>>][]) {
+		for (const [label, id] of map) {
+			if (idByLabel.has(label)) {
+				throw new Error(
+					`loadBaseIntoConvexTest: label "${label}" is bound in more than one table (now ${table}); ` +
+						"labels must be unique across tables",
+				);
+			}
+			idByLabel.set(label, id);
+		}
+	}
+	return idByLabel;
 }
 

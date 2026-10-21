@@ -8,6 +8,9 @@
 /** One table's golden base-state summary: row count plus a content hash. */
 export type TableParity = { count: number; contentHash: string };
 
+/** ID-shaped fields whose values map to corpus labels before hashing. */
+const ID_LIKE_FIELDS: ReadonlySet<string> = new Set(["_id", "room", "user", "sender", "message"]);
+
 /**
  * A label-mapped, deterministic hash of one table's rows: every `_id` and
  * foreign-key `Id` field is replaced by its corpus label (raw IDs always
@@ -25,7 +28,6 @@ export async function computeParity(
 	rows: readonly Record<string, unknown>[],
 	labelByRawId: ReadonlyMap<string, string>,
 ): Promise<TableParity> {
-	const ID_LIKE_FIELDS = new Set(["_id", "room", "user", "sender", "message"]);
 	const mapValue = (key: string, value: unknown): unknown => {
 		if (ID_LIKE_FIELDS.has(key) && typeof value === "string") {
 			return labelByRawId.get(value) ?? value;

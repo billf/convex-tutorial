@@ -390,16 +390,15 @@ for (const key of ["V1", "V2", "V3", "V6"] as const) {
 		expect(await feedFor(t, room)).toEqual(expectedBase);
 
 		const deltas = vector.deltas as { mutation: string; args: Record<string, unknown>; label?: string }[];
-		const expectedAfterDelta = vector.expectedAfterDelta as (CorpusOutRow[] | null)[];
+		const expectedAfterDelta = vector.expectedAfterDelta as CorpusOutRow[][];
 		for (let i = 0; i < deltas.length; i++) {
 			const ack = await applyDelta(t, idByLabel, deltas[i]!);
 			expect(ack.marker).toBeGreaterThan(0);
 			const expected = expectedAfterDelta[i];
-			if (expected !== null) {
-				expect(await feedFor(t, room)).toEqual(
-					expected.map((row) => resolveExpected(row, idByLabel)),
-				);
-			}
+			expect(expected, `vector ${key} delta ${i} must declare its feed`).not.toBeNull();
+			expect(await feedFor(t, room)).toEqual(
+				expected!.map((row) => resolveExpected(row, idByLabel)),
+			);
 		}
 	});
 }
@@ -902,6 +901,83 @@ test("each mutation's acks name the rows it wrote", async () => {
 	expect(storedLike?.message).toBe(messageId);
 });
 
+test("proofVehicle sendMessage rejects dangling room/sender ids without writing", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user } = await seedRoomWithMember(t);
+	const { deadRoom, deadUser } = await t.run(async (ctx) => {
+		const r = await ctx.db.insert("rooms", { name: "gone" });
+		const u = await ctx.db.insert("users", { name: "Ghost" });
+		return { deadRoom: r, deadUser: u };
+	});
+	await t.run(async (ctx) => {
+		await ctx.db.delete("rooms", deadRoom);
+		await ctx.db.delete("users", deadUser);
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	await expect(
+		t.mutation(MUTATIONS.sendMessage!, { room: deadRoom, sender: user, body: "far" }),
+	).rejects.toThrow(/must both exist/);
+	await expect(
+		t.mutation(MUTATIONS.sendMessage!, { room, sender: deadUser, body: "ghost" }),
+	).rejects.toThrow(/must both exist/);
+
+	const stored = await t.run(async (ctx) => ({
+		messages: await ctx.db.query("messages").collect(),
+		marker: await ctx.db.query("proofVehicleMarkers").unique(),
+	}));
+	expect(stored.messages).toHaveLength(0);
+	expect(stored.marker?.sequence).toBe(marker);
+});
+
+test("single-row mutations reject dangling ids without bumping the marker", async () => {
+	const t = convexTest(schema, modules);
+	const { room, user, membership } = await seedRoomWithMember(t);
+	const ids = await t.run(async (ctx) => {
+		const m = await ctx.db.insert("messages", { room, sender: user, body: "one" });
+		const u = await ctx.db.insert("users", { name: "Ghost" });
+		const l = await ctx.db.insert("likes", { message: m, user });
+		const ms = await ctx.db.insert("memberships", { room, user, active: true });
+		return { m, u, l, ms };
+	});
+	await t.run(async (ctx) => {
+		await ctx.db.delete("messages", ids.m);
+		await ctx.db.delete("users", ids.u);
+		await ctx.db.delete("likes", ids.l);
+		await ctx.db.delete("memberships", ids.ms);
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+
+	// Platform contract, pinned: patch/delete of a missing row throws, and
+	// the throw precedes bumpMarker, so a dangling id never advances the
+	// harness sequence.
+	await expect(
+		t.mutation(MUTATIONS.updateMessageBody!, { message: ids.m, body: "after" }),
+	).rejects.toThrow();
+	await expect(t.mutation(MUTATIONS.deleteMessage!, { message: ids.m })).rejects.toThrow();
+	await expect(t.mutation(MUTATIONS.renameUser!, { user: ids.u, name: "x" })).rejects.toThrow();
+	await expect(t.mutation(MUTATIONS.deleteUser!, { user: ids.u })).rejects.toThrow();
+	await expect(
+		t.mutation(MUTATIONS.setMembershipActive!, { membership: ids.ms, active: false }),
+	).rejects.toThrow();
+	await expect(t.mutation(MUTATIONS.removeLike!, { like: ids.l })).rejects.toThrow();
+
+	const stored = await t.run((ctx) => ctx.db.query("proofVehicleMarkers").unique());
+	expect(stored?.sequence).toBe(marker);
+});
+
+test("loadBaseIntoConvexTest refuses a label reused across tables", async () => {
+	const t = convexTest(schema, modules);
+	await expect(
+		t.run((ctx) =>
+			loadBaseIntoConvexTest(ctx, [
+				{ op: "insertRoom", label: "x", name: "room" },
+				{ op: "insertUser", label: "x", name: "x" },
+			]),
+		),
+	).rejects.toThrow(/more than one table/);
+});
+
 // Branch-review BR4: updateMessageBody and renameUser are registered in
 // MUTATIONS but no corpus delta or prior test ever invokes either, so
 // neither had any test evidence of behaving as documented.
@@ -942,6 +1018,18 @@ test("fixture:marker increments a sequence each call", async () => {
 	const first = await t.mutation(fixtureMarker, {});
 	const second = await t.mutation(fixtureMarker, {});
 	expect(second.marker).toBe(first.marker + 1);
+});
+
+test("fixture:marker degrades to latest instead of throwing on duplicate rows", async () => {
+	const t = convexTest(schema, modules);
+	await t.run(async (ctx) => {
+		await ctx.db.insert("proofVehicleMarkers", { sequence: 5 });
+		await ctx.db.insert("proofVehicleMarkers", { sequence: 9 });
+	});
+	const { marker } = await t.mutation(fixtureMarker, {});
+	expect(marker).toBe(10);
+	const rows = await t.run((ctx) => ctx.db.query("proofVehicleMarkers").collect());
+	expect(rows.map((row) => row.sequence).sort((a, b) => a - b)).toEqual([5, 10]);
 });
 
 test("V4's tied rows carry message-<bound label> bodies after the patch", async () => {

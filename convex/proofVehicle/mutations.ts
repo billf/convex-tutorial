@@ -20,6 +20,16 @@ export const sendMessage = mutation({
 		marker: v.number(),
 	}),
 	handler: async (ctx, args) => {
+		// Fail closed like chat:sendMessage and addLike: a delta replaying
+		// against a stale room or sender id must reject instead of writing
+		// a phantom message that roomFeed would surface with sender: null.
+		const [roomDoc, senderDoc] = await Promise.all([
+			ctx.db.get("rooms", args.room),
+			ctx.db.get("users", args.sender),
+		]);
+		if (roomDoc === null || senderDoc === null) {
+			throw new Error("sendMessage: room and sender must both exist");
+		}
 		const message = await ctx.db.insert("messages", {
 			room: args.room,
 			sender: args.sender,
