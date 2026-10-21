@@ -37,8 +37,8 @@ That vendored output (`convex/_generated/ai/`, `.agents/skills/`,
   `convex/**` against `convex/tsconfig.json`, a narrower config (no
   vitest/`convex-test` types) that's scoped to what Convex actually bundles
   and deploys — it will report false errors on `convex/*.test.ts`. The root
-  `tsconfig.json` covers `src/`, `convex/`, and `vite.config.mts` together
-  and is the correct one to check against during development.
+  `tsconfig.json` covers `src/`, `convex/`, `scripts/`, and `vite.config.mts`
+  together and is the correct one to check against during development.
 - `npm run proof-vehicle-load <V1|V2|V3|V4|V5|V6>` — loads one corpus
   vector from `convex/proofVehicle/corpus/v1.json` into a real Convex
   deployment (see `scripts/proof-vehicle-load.ts`'s own header for

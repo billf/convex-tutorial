@@ -350,10 +350,13 @@ test("compareDesc orders equal-_creationTime rows by descending _id, time first"
 	const tiedA = { ...docA!, _creationTime: 100 };
 	const tiedB = { ...docB!, _creationTime: 100 };
 	// The leg is decisive and pinned against an independent reference
-	// sort: a flipped comparison (or a dropped leg) disagrees here.
-	expect([tiedA, tiedB].sort(compareDesc)).toEqual(
-		[tiedA, tiedB].sort((a, b) => (a._id > b._id ? -1 : a._id < b._id ? 1 : 0)),
-	);
+	// sort in BOTH input orders: V8's sort is stable, so a dropped leg
+	// (return 0 on ties) keeps whichever input order it is given -- and
+	// exactly one of the two input orders disagrees with the reference
+	// no matter how the random ids fall, making the catch deterministic.
+	const reference = (a: typeof tiedA, b: typeof tiedB) => (a._id > b._id ? -1 : a._id < b._id ? 1 : 0);
+	expect([tiedA, tiedB].sort(compareDesc)).toEqual([tiedA, tiedB].sort(reference));
+	expect([tiedB, tiedA].sort(compareDesc)).toEqual([tiedB, tiedA].sort(reference));
 	// Time still dominates the _id leg.
 	const newer = { ...docA!, _creationTime: 200 };
 	expect([tiedB, newer].sort(compareDesc)[0]!._id).toBe(newer._id);
