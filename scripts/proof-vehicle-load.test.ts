@@ -305,6 +305,21 @@ test("shipped sources contain no --admin-key flag literal", () => {
 	}
 });
 
+// #4 (round-2 P3): the hermetic messagesRaw test inserts only schema-valid
+// rows, so a fully validated query would pass it too -- the unvalidated
+// shape itself is pinned here instead, mirroring the --admin-key
+// source scan above. KTD8's legacy guard depends on this exact shape: on a
+// pre-migration deployment the rows lack `room`/`sender`, and only a
+// v.array(v.any()) returns validator lets the loader see them instead of
+// dying in returns validation before `legacyMessagesPresent` runs.
+test("tables:messagesRaw keeps an unvalidated v.any() element shape", () => {
+	const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+	const text = readFileSync(join(root, "convex/proofVehicle/tables.ts"), "utf8");
+	const start = text.indexOf("export const messagesRaw");
+	expect(start, "messagesRaw query exists in tables.ts").toBeGreaterThan(-1);
+	expect(text.slice(start, start + 400)).toContain("v.array(v.any())");
+});
+
 // #1: every deployment read goes through queryWithRetry -- a stalled
 // deployment must fail loudly with an attributed error, and a transient
 // blip must not abort the run.

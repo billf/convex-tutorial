@@ -18,6 +18,7 @@ import {
 	MUTATION_TEST_META,
 	runLoadBase,
 	seedRoomWithMember,
+	seedMessageWithLiker,
 	fixtureMarker,
 	fixtureReset,
 	patchMessageBody,
@@ -127,11 +128,8 @@ const membershipAndLikesBatchTxn = makeFunctionReference<
 test("membershipAndLikesBatchTxn patches the membership and inserts every like, acking them in order", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user, membership } = await seedRoomWithMember(t);
-	const { m1, m2, liker } = await t.run(async (ctx) => ({
-		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
-		m2: await ctx.db.insert("messages", { room, sender: user, body: "two" }),
-		liker: await ctx.db.insert("users", { name: "Liker" }),
-	}));
+	const { m1, liker } = await seedMessageWithLiker(t, room, user);
+	const m2 = await t.run((ctx) => ctx.db.insert("messages", { room, sender: user, body: "two" }));
 
 	const ack = await t.mutation(membershipAndLikesBatchTxn, {
 		membership,
@@ -197,10 +195,7 @@ test("membershipAndLikesBatchTxn rejects 101 likes without writing", async () =>
 test("membershipAndLikesBatchTxn is idempotent: replaying a batch names the same like rows", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user, membership } = await seedRoomWithMember(t);
-	const { m1, liker } = await t.run(async (ctx) => ({
-		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
-		liker: await ctx.db.insert("users", { name: "Liker" }),
-	}));
+	const { m1, liker } = await seedMessageWithLiker(t, room, user);
 	const args = { membership, active: false, likes: [{ message: m1, user: liker }] };
 
 	const first = await t.mutation(membershipAndLikesBatchTxn, args);
@@ -216,10 +211,7 @@ test("membershipAndLikesBatchTxn is idempotent: replaying a batch names the same
 test("membershipAndLikesBatchTxn collapses duplicate pairs within one batch", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user, membership } = await seedRoomWithMember(t);
-	const { m1, liker } = await t.run(async (ctx) => ({
-		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
-		liker: await ctx.db.insert("users", { name: "Liker" }),
-	}));
+	const { m1, liker } = await seedMessageWithLiker(t, room, user);
 
 	const ack = await t.mutation(membershipAndLikesBatchTxn, {
 		membership,
@@ -239,9 +231,8 @@ test("membershipAndLikesBatchTxn collapses duplicate pairs within one batch", as
 test("membershipAndLikesBatchTxn skips likes whose message or user no longer exists", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user, membership } = await seedRoomWithMember(t);
-	const { m1, liker, deadMessage, deadUser } = await t.run(async (ctx) => ({
-		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
-		liker: await ctx.db.insert("users", { name: "Liker" }),
+	const { m1, liker } = await seedMessageWithLiker(t, room, user);
+	const { deadMessage, deadUser } = await t.run(async (ctx) => ({
 		deadMessage: await ctx.db.insert("messages", { room, sender: user, body: "gone" }),
 		deadUser: await ctx.db.insert("users", { name: "Ghost" }),
 	}));
@@ -360,10 +351,7 @@ test("membershipAndLikesBatchTxn rejects an unknown membership without writing",
 test("addLike is idempotent and refuses dangling targets", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user } = await seedRoomWithMember(t);
-	const { m1, liker } = await t.run(async (ctx) => ({
-		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
-		liker: await ctx.db.insert("users", { name: "Liker" }),
-	}));
+	const { m1, liker } = await seedMessageWithLiker(t, room, user);
 
 	const first = await t.mutation(MUTATIONS.addLike!, { message: m1, user: liker });
 	const second = await t.mutation(MUTATIONS.addLike!, { message: m1, user: liker });
@@ -380,10 +368,7 @@ test("addLike is idempotent and refuses dangling targets", async () => {
 test("membershipAndLikesTxn is idempotent on a repeated like", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user, membership } = await seedRoomWithMember(t);
-	const { m1, liker } = await t.run(async (ctx) => ({
-		m1: await ctx.db.insert("messages", { room, sender: user, body: "one" }),
-		liker: await ctx.db.insert("users", { name: "Liker" }),
-	}));
+	const { m1, liker } = await seedMessageWithLiker(t, room, user);
 
 	const args = { membership, active: false, message: m1, user: liker };
 	const first = await t.mutation(MUTATIONS.membershipAndLikesTxn!, args);

@@ -110,11 +110,12 @@ export function planImportPhases(ops: readonly BaseOp[]): Phase[] {
 		likes: [],
 	};
 	for (const op of ops) {
-		if (op.op === "insertRoom") byTable.rooms.push(op);
-		else if (op.op === "insertUser") byTable.users.push(op);
-		else if (op.op === "insertMembership") byTable.memberships.push(op);
-		else if (op.op === "insertMessage") byTable.messages.push(op);
-		else if (op.op === "insertLike") byTable.likes.push(op);
+		// The table leg of the shared op switch (#6): a new op type is
+		// added in opTableAndFields once, and bucketing follows it --
+		// there is no parallel if/else chain to keep in sync. Labels are
+		// irrelevant here, so the resolver is the identity.
+		const [table] = opTableAndFields(op, (label) => label);
+		byTable[table].push(op);
 	}
 	// Messages import in ascending creationTime order so the epoch-offset
 	// timestamps this file assigns land in the corpus's own relative order

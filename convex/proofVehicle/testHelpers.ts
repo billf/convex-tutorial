@@ -201,6 +201,24 @@ export async function seedRoomWithMember(t: ReturnType<typeof convexTest>) {
 	});
 }
 
+/**
+ * Seeds one message (default body "one") plus a liker user beside an
+ * existing room/member pair -- the shared setup for like-write tests.
+ * Callers needing extra rows (a second message, dangling targets) insert
+ * those separately after this call.
+ */
+export async function seedMessageWithLiker(
+	t: ReturnType<typeof convexTest>,
+	room: Id<"rooms">,
+	user: Id<"users">,
+	body = "one",
+) {
+	return t.run(async (ctx) => ({
+		m1: await ctx.db.insert("messages", { room, sender: user, body }),
+		liker: await ctx.db.insert("users", { name: "Liker" }),
+	}));
+}
+
 // convex-test's `t.run` serializes its callback's return value the same
 // way a mutation's return value is serialized, and a `Map` is not a
 // supported Convex type -- so run the load, then rebuild the Map outside

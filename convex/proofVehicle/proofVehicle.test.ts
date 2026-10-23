@@ -272,7 +272,9 @@ test("allSelectedRows returns every row, each tagged with its table, including t
 // KTD8 legacy guard (#13): the loader's preflight reads messages through
 // this unvalidated shape so pre-migration rows (missing `room`) reach
 // `legacyMessagesPresent` instead of dying in returns validation. Pinned
-// here: the query returns whatever rows exist, typed or not.
+// here: the query returns whatever rows exist. The unvalidated shape
+// itself is pinned in scripts/proof-vehicle-load.test.ts (a hermetic test
+// can only insert schema-valid rows, so it cannot tell the shapes apart).
 test("tables:messagesRaw returns message rows without returns validation", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user } = await seedRoomWithMember(t);
@@ -338,7 +340,8 @@ test("V4 (exact 50-row boundary and ID tie): the excluded 51st row and the inclu
 // tie-break leg of the canonical order had no hermetic cover -- inverting
 // or deleting it kept the suite green. Pinned here directly: hermetic
 // inserts cannot produce equal `_creationTime` rows, so the tie is forced
-// by spreading real rows with an overridden timestamp.
+// by spreading real rows with an overridden timestamp, asserted in both
+// input orders (V8's stable sort would otherwise hide a dropped leg).
 test("compareDesc orders equal-_creationTime rows by descending _id, time first", async () => {
 	const t = convexTest(schema, modules);
 	const { room, user } = await seedRoomWithMember(t);

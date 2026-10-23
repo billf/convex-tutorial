@@ -103,11 +103,20 @@ async function boundedRoomFeed(ctx: QueryCtx, room: Id<"rooms">, limit: number) 
 	return Promise.all(included.slice(0, limit).map((message) => toFeedRow(ctx, message)));
 }
 
+/**
+ * The oracle's fixed feed boundary (#2): one constant for the roomFeed
+ * call arg, the roomFeedPrefix validator bound, and the validator's error
+ * text, so a limit change cannot desync the oracle from its baseline.
+ * (chat.ts's own take(50) is a separate tutorial-UI page size, not this
+ * contract -- it intentionally stays independent.)
+ */
+export const FEED_LIMIT = 50;
+
 /** The canonical oracle: the fixed 50-message room feed (P6, Q4). */
 export const roomFeed = query({
 	args: { room: v.id("rooms") },
 	returns: v.array(feedRow),
-	handler: async (ctx, args) => boundedRoomFeed(ctx, args.room, 50),
+	handler: async (ctx, args) => boundedRoomFeed(ctx, args.room, FEED_LIMIT),
 });
 
 /**
@@ -120,8 +129,8 @@ export const roomFeedPrefix = query({
 	args: { room: v.id("rooms"), n: v.number() },
 	returns: v.array(feedRow),
 	handler: async (ctx, args) => {
-		if (!Number.isInteger(args.n) || args.n < 0 || args.n > 50) {
-			throw new Error("roomFeedPrefix: n must be an integer in [0, 50]");
+		if (!Number.isInteger(args.n) || args.n < 0 || args.n > FEED_LIMIT) {
+			throw new Error(`roomFeedPrefix: n must be an integer in [0, ${FEED_LIMIT}]`);
 		}
 		return boundedRoomFeed(ctx, args.room, args.n);
 	},
