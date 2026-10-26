@@ -83,15 +83,13 @@ async function boundedRoomFeed(ctx: QueryCtx, room: Id<"rooms">, limit: number) 
 		.withIndex("by_room", (q) => q.eq("room", room))
 		.collect();
 
-	const flags = await Promise.all(
-		candidates.map((message) => isActiveMember(ctx, room, message.sender)),
-	);
-	const included: Doc<"messages">[] = [];
-	candidates.forEach((message, i) => {
-		if (flags[i]) {
-			included.push(message);
-		}
-	});
+	// One membership lookup per distinct sender, not per message: the
+	// per-message shape above re-ran the same by_room_user query for every
+	// message from a repeat sender, so cost grew with total room history.
+	const senders = [...new Set(candidates.map((message) => message.sender))];
+	const activeFlags = await Promise.all(senders.map((sender) => isActiveMember(ctx, room, sender)));
+	const isActive = new Map(senders.map((sender, i) => [sender, activeFlags[i] ?? false]));
+	const included = candidates.filter((message) => isActive.get(message.sender) === true);
 	included.sort(compareDesc);
 	return Promise.all(included.slice(0, limit).map((message) => toFeedRow(ctx, message)));
 }

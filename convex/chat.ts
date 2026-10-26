@@ -30,7 +30,21 @@ async function getOrCreateDefaultRoom(ctx: MutationCtx): Promise<Id<"rooms">> {
 	if (existing !== undefined) {
 		return existing._id;
 	}
-	return await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
+	const created = await ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME });
+	// A racing first-ever sendMessage may have committed its own "general"
+	// room between the lookup above and this insert (this transaction could
+	// not see it). Converge on the oldest row: if it is not the one just
+	// created, drop the duplicate and use the canonical one, so later reads
+	// (which take the oldest match) can never miss this caller's message.
+	// Residual: two commits that stay mutually invisible still leave a
+	// duplicate behind -- Convex offers no uniqueness constraint to close
+	// that case, so run first-ever sends quiesced if it matters.
+	const canonical = await findDefaultRoom(ctx);
+	if (canonical !== undefined && canonical._id !== created) {
+		await ctx.db.delete("rooms", created);
+		return canonical._id;
+	}
+	return created;
 }
 
 /**

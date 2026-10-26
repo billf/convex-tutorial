@@ -434,14 +434,9 @@ async function readBackLabels(
 	phase: Phase,
 	idByLabel: ReadonlyMap<string, string>,
 ): Promise<Map<string, string>> {
-	const ref = makeFunctionReference<
-		"query",
-		Record<string, never>,
-		({ _id: string } & Record<string, unknown>)[]
-	>(`proofVehicle/tables:${phase.table}`);
-	const rows = await withDeadline(
-		client.query(ref, {}),
-		60_000,
+	const rows = await queryPhaseTable<{ _id: string } & Record<string, unknown>>(
+		client,
+		phase.table,
 		`readBackLabels(${phase.table})`,
 	);
 	const idByNaturalKey = indexRowsByNaturalKey(phase.table, rows);
@@ -477,6 +472,21 @@ export function computeNonEmptyTables(tables: {
 	);
 }
 
+/**
+ * One deployment-table read with the standard 60s fail-loud deadline.
+ * Centralizes the query+withDeadline shape all preflight, recheck, and
+ * read-back paths share, so the label format cannot drift between sites.
+ */
+function queryPhaseTable<T>(client: ConvexHttpClient, table: string, what: string): Promise<T[]> {
+	return withDeadline(
+		client.query(
+			makeFunctionReference<"query", Record<string, never>, T[]>(`proofVehicle/tables:${table}`),
+			{},
+		),
+		60_000,
+		what,
+	);
+}
 /**
  * Races a deployment read against a fixed clock: a hung backend must fail
  * this loader loudly (naming the read) instead of hanging the CLI forever.
@@ -523,14 +533,9 @@ async function main(): Promise<void> {
 	const url = target.url;
 	const client = new ConvexHttpClient(url);
 
-	const existingMessages = await withDeadline(
-		client.query(
-			makeFunctionReference<"query", Record<string, never>, Record<string, unknown>[]>(
-				"proofVehicle/tables:messages",
-			),
-			{},
-		),
-		60_000,
+	const existingMessages = await queryPhaseTable<Record<string, unknown>>(
+		client,
+		"messages",
 		"tables:messages legacy-row preflight",
 	);
 	if (legacyMessagesPresent(existingMessages)) {
@@ -553,44 +558,10 @@ async function main(): Promise<void> {
 		// Independent preflight reads: fetch concurrently, then apply the
 		// same guard predicate to the same keyed inputs.
 		const [rooms, users, memberships, likes] = await Promise.all([
-			withDeadline(
-				client.query(
-					makeFunctionReference<"query", Record<string, never>, unknown[]>(
-						"proofVehicle/tables:rooms",
-					),
-					{},
-				),
-				60_000,
-				"tables:rooms emptiness preflight",
-			),
-			withDeadline(
-				client.query(
-					makeFunctionReference<"query", Record<string, never>, unknown[]>(
-						"proofVehicle/tables:users",
-					),
-					{},
-				),
-				60_000,
-				"tables:users emptiness preflight",
-			),
-			withDeadline(
-				client.query(
-					makeFunctionReference<"query", Record<string, never>, unknown[]>(
-						"proofVehicle/tables:memberships",
-					),
-					{},
-				),
-				60_000,
-				"tables:memberships emptiness preflight",
-			),
-			withDeadline(
-				client.query(
-					makeFunctionReference<"query", Record<string, never>, unknown[]>("proofVehicle/tables:likes"),
-					{},
-				),
-				60_000,
-				"tables:likes emptiness preflight",
-			),
+			queryPhaseTable(client, "rooms", "tables:rooms emptiness preflight"),
+			queryPhaseTable(client, "users", "tables:users emptiness preflight"),
+			queryPhaseTable(client, "memberships", "tables:memberships emptiness preflight"),
+			queryPhaseTable(client, "likes", "tables:likes emptiness preflight"),
 		]);
 		const nonEmptyTables = computeNonEmptyTables({
 			rooms,
@@ -620,16 +591,7 @@ async function main(): Promise<void> {
 		// instead. Re-checking immediately before each phase (rather than
 		// only once, before all five) still fails fast with a clear error
 		// instead of a mid-loop import rejection.
-		const rows = await withDeadline(
-			client.query(
-				makeFunctionReference<"query", Record<string, never>, unknown[]>(
-					`proofVehicle/tables:${phase.table}`,
-				),
-				{},
-			),
-			60_000,
-			`tables:${phase.table} pre-import recheck`,
-		);
+		const rows = await queryPhaseTable(client, phase.table, `tables:${phase.table} pre-import recheck`);
 		if (rows.length > 0) {
 			throw new Error(
 				`non-empty-target: ${phase.table} gained rows after the initial preflight check ` +

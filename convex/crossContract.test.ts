@@ -1,14 +1,15 @@
-/// <reference types="vite/client" />
 /**
  * Branch-review BR7/BR8: two design decisions the branch review surfaced.
  * BR8 was resolved by an explicit product decision (2026-09-26: demo/test
  * chat traffic should populate demo/test memberships, to keep demo/test
  * behavior as close to production as possible) and is now a regression
- * test for that fix. BR7 remains an open decision (which deleted-sender
- * projection to standardize on); its test only characterizes the current
- * split so a future change to either side is a deliberate, visible diff
- * here rather than a silent regression -- see this repo's `.agent-reviews/`
- * branch review file for the full write-up and suggested fixes.
+ * test for that fix. BR7 is settled as independent contracts (2026-10-26):
+ * chat:getMessages keeps a dead sender id with name "Unknown" (a UI row
+ * must stay displayable), while proofVehicle/feed:roomFeed projects the
+ * same event as sender:null (the oracle must distinguish a missing join
+ * target from a live one). Neither side may change its projection without
+ * updating this contract first -- see this repo's `.agent-reviews/`
+ * branch review file for the full write-up and the rejected alternatives.
  */
 import { convexTest } from "convex-test";
 import { expect, test } from "vitest";
@@ -28,7 +29,7 @@ const roomFeed = makeFunctionReference<
 	{ sender: { _id: Id<"users">; name: string } | null }[]
 >("proofVehicle/feed:roomFeed");
 
-test("BR7 (not fixed): chat:getMessages and proofVehicle/feed:roomFeed disagree on a deleted sender", async () => {
+test("BR7 (settled: independent sender projections): chat keeps the dead id as Unknown while roomFeed projects sender:null", async () => {
 	const t = convexTest(schema, modules);
 	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Ghost" });
 	await t.mutation(api.chat.sendMessage, { user: userId, body: "boo" });
@@ -48,10 +49,10 @@ test("BR7 (not fixed): chat:getMessages and proofVehicle/feed:roomFeed disagree 
 	expect(feed).toHaveLength(1);
 	expect(feed[0]!.sender).toBe(null); // dead id dropped entirely
 
-	// The two queries project the SAME underlying event (a message whose
-	// sender row no longer exists) differently. Neither is "wrong" in
-	// isolation; BR7 flags that a consumer written against one contract
-	// would mishandle the other's output.
+	// sender row no longer exists) differently on purpose (settled 2026-10-26:
+	// chat keeps a displayable row, the oracle keeps join-exactness). A
+	// consumer must pick its contract deliberately; changing either
+	// projection requires updating the header contract first.
 });
 
 test("BR8 (fixed 2026-09-26): a message sent via chat:sendMessage is visible to proofVehicle/feed:roomFeed", async () => {

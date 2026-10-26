@@ -45,6 +45,12 @@ const likes = makeFunctionReference<
 	{ _id: Id<"likes">; message: Id<"messages">; user: Id<"users"> }[]
 >("proofVehicle/tables:likes");
 
+const markers = makeFunctionReference<
+	"query",
+	Record<string, never>,
+	{ _id: Id<"proofVehicleMarkers">; sequence: number } | null
+>("proofVehicle/tables:markers");
+
 type Ack = { affectedIds: Record<string, string>; marker: number };
 function mutationRef(name: string) {
 	return makeFunctionReference<"mutation", Record<string, unknown>, Ack>(name);
@@ -978,6 +984,23 @@ test("loadBaseIntoConvexTest refuses a label reused across tables", async () => 
 	).rejects.toThrow(/more than one table/);
 });
 
+test("tables:markers is null before the first marker run", async () => {
+	const t = convexTest(schema, modules);
+	await seedRoomWithMember(t);
+	expect(await t.query(markers, {})).toBeNull();
+});
+
+test("tables:markers returns the latest row when duplicates exist", async () => {
+	const t = convexTest(schema, modules);
+	await seedRoomWithMember(t);
+	await t.run(async (ctx) => {
+		await ctx.db.insert("proofVehicleMarkers", { sequence: 3 });
+		await ctx.db.insert("proofVehicleMarkers", { sequence: 7 });
+	});
+	const row = await t.query(markers, {});
+	expect(row?.sequence).toBe(7);
+});
+
 // Branch-review BR4: updateMessageBody and renameUser are registered in
 // MUTATIONS but no corpus delta or prior test ever invokes either, so
 // neither had any test evidence of behaving as documented.
@@ -1049,18 +1072,25 @@ test("V4's tied rows carry message-<bound label> bodies after the patch", async 
 });
 
 test("AE14: replaying one delta log into two independently loaded copies yields equal label-mapped parity hashes", async () => {
-	const vector = corpus.vectors.V5;
-	const loadAndComputeParity = async () => {
+	const vector = corpus.vectors.V3;
+	const loadApplyAndComputeParity = async () => {
 		const t = convexTest(schema, modules);
 		const idByLabel = await runLoadBase(t, vector.base as BaseOp[]);
+		// Replay V3's first delta (addLike with label l1): the created like
+		// row binds to l1, so both copies hash it by label, not raw id.
+		await applyDelta(
+			t,
+			idByLabel,
+			(vector.deltas as { mutation: string; args: Record<string, unknown>; label?: string }[])[0]!,
+		);
 		const labelByRawId = new Map<string, string>();
 		for (const [label, id] of idByLabel) labelByRawId.set(id, label);
-		const rows = await t.run((ctx) => ctx.db.query("messages").collect());
+		const rows = await t.run((ctx) => ctx.db.query("likes").collect());
 		return computeParity(rows, labelByRawId);
 	};
 
-	const parityA = await loadAndComputeParity();
-	const parityB = await loadAndComputeParity();
+	const parityA = await loadApplyAndComputeParity();
+	const parityB = await loadApplyAndComputeParity();
 	expect(parityA).toEqual(parityB);
 });
 
