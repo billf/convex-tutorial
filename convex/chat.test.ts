@@ -2,9 +2,20 @@
 import { convexTest } from "convex-test";
 import { expect, test } from "vitest";
 import { api } from "./_generated/api";
+import { DEFAULT_ROOM_NAME } from "./chat";
 import schema from "./schema";
 
 const modules = import.meta.glob("./**/*.ts");
+
+// Branch-review BR3: getMessages's `if (room === undefined)` guard
+// (the case before any message has ever been sent, on a genuinely fresh
+// deployment) was never exercised by any prior test -- every other case
+// calls sendMessage first, which lazily creates the room.
+test("getMessages returns [] on a fresh deployment, before any room exists", async () => {
+	const t = convexTest(schema, modules);
+	const messages = await t.query(api.chat.getMessages, {});
+	expect(messages).toEqual([]);
+});
 
 test("getOrCreateUser is idempotent and distinguishes different names", async () => {
 	const t = convexTest(schema, modules);
@@ -38,7 +49,7 @@ test("sendMessage inserts a message tied to the given user", async () => {
 
 	const messages = await t.run((ctx) => ctx.db.query("messages").collect());
 	expect(messages).toHaveLength(1);
-	expect(messages[0].user).toBe(userId);
+	expect(messages[0].sender).toBe(userId);
 	expect(messages[0].body).toBe("hi");
 });
 
@@ -69,4 +80,36 @@ test('getMessages falls back to "Unknown" when a message\'s user no longer resol
 	const messages = await t.query(api.chat.getMessages, {});
 	expect(messages).toHaveLength(1);
 	expect(messages[0].name).toBe("Unknown");
+});
+
+// M1 regression: by_name has no uniqueness guarantee, so two "general"
+// rooms must not make getMessages throw -- it reads the oldest match.
+test("getMessages tolerates duplicate default rooms and reads the oldest", async () => {
+	const t = convexTest(schema, modules);
+	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
+	const firstRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+	const secondRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+	await t.run((ctx) => ctx.db.insert("messages", { room: firstRoom, sender: userId, body: "old" }));
+	await t.run((ctx) =>
+		ctx.db.insert("messages", { room: secondRoom, sender: userId, body: "new" }),
+	);
+
+	const messages = await t.query(api.chat.getMessages, {});
+	expect(messages.map((message) => message.body)).toEqual(["old"]);
+});
+
+// Creator convergence: when duplicate "general" rooms already exist (manual
+// seeding, a second backend), sendMessage writes into the oldest one, so
+// traffic converges instead of fanning out across the duplicates.
+test("sendMessage with duplicate default rooms writes into the oldest", async () => {
+	const t = convexTest(schema, modules);
+	const userId = await t.mutation(api.chat.getOrCreateUser, { name: "Alice" });
+	const firstRoom = await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+	await t.run((ctx) => ctx.db.insert("rooms", { name: DEFAULT_ROOM_NAME }));
+
+	await t.mutation(api.chat.sendMessage, { user: userId, body: "hi" });
+
+	const messages = await t.run((ctx) => ctx.db.query("messages").collect());
+	expect(messages).toHaveLength(1);
+	expect(messages[0].room).toBe(firstRoom);
 });
